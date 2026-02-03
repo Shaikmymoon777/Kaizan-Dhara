@@ -116,6 +116,48 @@ Preferences.init(
     }
 );
 
+export class ChatMessage extends Model {
+    public id!: string;
+    public projectId!: string;
+    public role!: string;
+    public content!: string;
+    public status!: string;
+    public timestamp!: Date;
+}
+
+ChatMessage.init(
+    {
+        id: {
+            type: DataTypes.STRING,
+            primaryKey: true,
+        },
+        projectId: {
+            type: DataTypes.STRING,
+            allowNull: false,
+        },
+        role: {
+            type: DataTypes.STRING,
+            allowNull: false,
+        },
+        content: {
+            type: DataTypes.TEXT,
+            allowNull: false,
+        },
+        status: {
+            type: DataTypes.STRING,
+            defaultValue: 'done',
+        },
+        timestamp: {
+            type: DataTypes.DATE,
+            defaultValue: DataTypes.NOW,
+        },
+    },
+    {
+        sequelize,
+        tableName: 'chat_messages',
+    }
+);
+
 // Sync database
 export const syncDatabase = async () => {
     await sequelize.sync({ alter: true });

@@ -1,5 +1,5 @@
 import express, { Request, Response } from 'express';
-import { Project, History, Preferences } from './models';
+import { Project, History, Preferences, ChatMessage } from './models';
 
 const router = express.Router();
 
@@ -168,6 +168,38 @@ router.post('/preferences', async (req: Request, res: Response) => {
         res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to save preferences' });
+    }
+});
+
+
+// --- Chat ---
+router.get('/chat/:projectId', async (req: Request, res: Response) => {
+    try {
+        const messages = await ChatMessage.findAll({
+            where: { projectId: req.params.projectId },
+            order: [['timestamp', 'ASC']]
+        });
+        res.json(messages);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch chat history' });
+    }
+});
+
+router.post('/chat/:projectId', async (req: Request, res: Response) => {
+    try {
+        const { id, role, content, status, timestamp } = req.body;
+        await ChatMessage.create({
+            id: id || Math.random().toString(36).substr(2, 9),
+            projectId: req.params.projectId,
+            role,
+            content,
+            status: status || 'done',
+            timestamp: timestamp || new Date()
+        });
+        res.json({ success: true });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to save chat message' });
     }
 });
 

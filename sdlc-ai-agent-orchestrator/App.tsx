@@ -11,6 +11,7 @@ import HomePage from './components/HomePage';
 import SearchBar from './components/SearchBar';
 import WorkflowAnimation from './components/WorkflowAnimation';
 import HistorySidebar from './components/HistorySidebar';
+import ChatSidebar from './components/ChatSidebar';
 
 type ThemeType = 'ocean' | 'sunset' | 'forest';
 
@@ -24,6 +25,7 @@ const App: React.FC = () => {
   const [view, setView] = useState<'home' | 'login' | 'app'>('home');
   const [theme, setTheme] = useState<ThemeType>('ocean');
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -50,15 +52,27 @@ const App: React.FC = () => {
     savePrefs();
   }, [theme]);
 
-  // Save project to history when completed
   useEffect(() => {
-    const saveToHistory = async () => {
+    const loadToHistory = async () => {
       if (project && !project.isProcessing && project.completedAt) {
         await storage.history.save(project);
       }
     };
-    saveToHistory();
+    loadToHistory();
   }, [project]);
+
+  // Load Chat History when project changes
+  useEffect(() => {
+    if (project?.id) {
+      const loadChat = async () => {
+        const history = await storage.chat.get(project.id);
+        if (history.length > 0) {
+          setMessages(history);
+        }
+      };
+      loadChat();
+    }
+  }, [project?.id]);
 
   const addMessage = (role: any, content: string, status: 'thinking' | 'done' | 'error' = 'done') => {
     const newMessage: AgentMessage = {
@@ -96,13 +110,41 @@ const App: React.FC = () => {
 
       try {
         setProject(p => p ? { ...p, isProcessing: true, currentStep: 3 } : null);
-        addMessage('Orchestrator', `I've received your update: "${modInput}". Initiating code modification...`, 'thinking');
+        const orchestratorMsg = `I've received your update: "${modInput}". Initiating code modification...`;
+        const orchId = addMessage('Orchestrator', orchestratorMsg, 'thinking');
+
+        // Persist User Message
+        const userMsg: AgentMessage = {
+          id: Math.random().toString(36).substr(2, 9),
+          role: 'User',
+          content: modInput,
+          timestamp: new Date(),
+          status: 'done'
+        };
+        await storage.chat.save(project.id, userMsg);
 
         const existingCode = project.code?.files['src/App.tsx'] || '';
         const updatedCode = await agentService.current.runModificationAgent(existingCode, modInput, project.requirements || {}, theme);
 
         setProject(p => p ? { ...p, code: updatedCode, isProcessing: false, currentStep: 5 } : null);
-        addMessage('Development', 'Code modification complete. View the updated preview in the Product Delivery tab.');
+        const finalMsg = 'Code modification complete. View the updated preview in the Product Delivery tab.';
+        addMessage('Development', finalMsg);
+
+        // Persist Orchestrator and Development messages
+        await storage.chat.save(project.id, {
+          id: orchId,
+          role: 'Orchestrator',
+          content: orchestratorMsg,
+          timestamp: new Date(),
+          status: 'done'
+        });
+        await storage.chat.save(project.id, {
+          id: Math.random().toString(36).substr(2, 9),
+          role: 'Development',
+          content: finalMsg,
+          timestamp: new Date(),
+          status: 'done'
+        });
 
         setTimeout(() => setActiveTab('output'), 1000);
       } catch (error) {
@@ -253,8 +295,22 @@ const App: React.FC = () => {
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
         onSelectProject={handleSelectHistoryProject}
-        theme={theme}
       />
+
+      {/* Chat Sidebar */}
+      {project && (
+        <ChatSidebar
+          isOpen={isChatOpen}
+          onClose={() => setIsChatOpen(false)}
+          projectId={project.id}
+          messages={messages}
+          onSendMessage={(content) => {
+            setInput(content);
+            handleStart();
+          }}
+          isProcessing={project.isProcessing}
+        />
+      )}
 
       {/* Navbar */}
       <header className="h-16 border-b border-slate-800 px-8 flex items-center justify-between backdrop-blur-md sticky top-0 z-40 bg-slate-950/50">
@@ -382,7 +438,6 @@ const App: React.FC = () => {
                 status={project?.currentStep === 1 ? 'processing' : (project?.currentStep && project.currentStep > 1 ? 'done' : 'idle')}
                 description="Synthesizes raw prompts into structured BA documentation."
                 icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>}
-                theme={theme}
               />
 
               <AgentCard
@@ -391,7 +446,6 @@ const App: React.FC = () => {
                 status={project?.currentStep === 2 ? 'processing' : (project?.currentStep && project.currentStep > 2 ? 'done' : 'idle')}
                 description="Drafts UI/UX wireframes and system component hierarchy."
                 icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"></path></svg>}
-                theme={theme}
               />
 
               <AgentCard
@@ -400,7 +454,6 @@ const App: React.FC = () => {
                 status={project?.currentStep === 3 ? 'processing' : (project?.currentStep && project.currentStep > 3 ? 'done' : 'idle')}
                 description="Lead engineer producing high-fidelity React implementation."
                 icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>}
-                theme={theme}
               />
 
               <AgentCard
@@ -409,7 +462,6 @@ const App: React.FC = () => {
                 status={project?.currentStep === 4 ? 'processing' : (project?.currentStep && project.currentStep > 4 ? 'done' : 'idle')}
                 description="QA specialist verifying build stability and performance."
                 icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>}
-                theme={theme}
               />
             </section>
           </div>
@@ -434,6 +486,13 @@ const App: React.FC = () => {
                         </h2>
                       </div>
                       <div className="flex items-center gap-4">
+                        <button
+                          onClick={() => setIsChatOpen(true)}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/20 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all border border-indigo-500/20"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
+                          <span>Modifications</span>
+                        </button>
                         <div className="text-[10px] text-slate-500 font-mono">
                           THEME: <span className="text-cyan-400">{project.theme?.toUpperCase() || theme.toUpperCase()}</span>
                         </div>
@@ -446,7 +505,7 @@ const App: React.FC = () => {
                     </div>
                     {/* Workflow Animation - Adjusted height for perfect sidebar alignment */}
                     <div className="h-[204px] flex flex-col justify-center">
-                      <WorkflowAnimation currentStep={project.currentStep || 0} theme={theme} />
+                      <WorkflowAnimation currentStep={project.currentStep || 0} />
                     </div>
                   </div>
                 ) : (
@@ -499,11 +558,11 @@ const App: React.FC = () => {
                   {messages.map((msg) => (
                     <div key={msg.id} className="flex gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
                       <div className={`flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center shadow-md ${msg.role === 'User' ? 'bg-slate-700 text-slate-100 border border-slate-600' :
-                          msg.role === 'Orchestrator' ? 'bg-indigo-600 text-white' :
-                            msg.role === 'Requirement' ? 'bg-cyan-600 text-white' :
-                              msg.role === 'Design' ? 'bg-fuchsia-600 text-white' :
-                                msg.role === 'Development' ? 'bg-amber-600 text-white' :
-                                  'bg-emerald-600 text-white'
+                        msg.role === 'Orchestrator' ? 'bg-indigo-600 text-white' :
+                          msg.role === 'Requirement' ? 'bg-cyan-600 text-white' :
+                            msg.role === 'Design' ? 'bg-fuchsia-600 text-white' :
+                              msg.role === 'Development' ? 'bg-amber-600 text-white' :
+                                'bg-emerald-600 text-white'
                         }`}>
                         <span className="text-[9px] font-black uppercase">{msg.role.slice(0, 2)}</span>
                       </div>

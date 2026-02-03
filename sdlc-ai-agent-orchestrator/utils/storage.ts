@@ -1,6 +1,6 @@
 // API Storage Utilities for User History and Preferences
 
-import { HistoryItem, UserPreferences, SDLCProject } from '../types';
+import { HistoryItem, UserPreferences, SDLCProject, AgentMessage } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const LOCAL_STORAGE_KEY = 'kaizen_dhara_history';
@@ -152,11 +152,36 @@ export const saveCurrentProject = async (project: SDLCProject | null): Promise<v
     }
 };
 
+// Chat History Management
+export const saveChatMessage = async (projectId: string, message: AgentMessage): Promise<void> => {
+    try {
+        await fetch(`${API_BASE}/chat/${projectId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(message),
+        });
+    } catch (error) {
+        console.error('Failed to save chat message:', error);
+    }
+};
+
+export const getChatHistory = async (projectId: string): Promise<AgentMessage[]> => {
+    try {
+        const res = await fetch(`${API_BASE}/chat/${projectId}`);
+        if (res.ok) {
+            const messages = await res.json();
+            return messages.map((msg: any) => ({
+                ...msg,
+                timestamp: new Date(msg.timestamp),
+            }));
+        }
+    } catch (error) {
+        console.error('Failed to get chat history:', error);
+    }
+    return [];
+};
+
 export const getCurrentProject = async (): Promise<SDLCProject | null> => {
-    // Current Project concept works differently with a real backend.
-    // Usually we load a specific project by ID.
-    // Use localStorage for just the ID of the last active project?
-    // Or just return null and let user select from history.
     return null;
 };
 
@@ -176,6 +201,10 @@ export const storage = {
     currentProject: {
         save: saveCurrentProject,
         get: getCurrentProject,
+    },
+    chat: {
+        save: saveChatMessage,
+        get: getChatHistory,
     },
 };
 
