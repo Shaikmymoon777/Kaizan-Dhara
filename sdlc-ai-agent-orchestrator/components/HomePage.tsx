@@ -272,16 +272,21 @@ function AnimatedLogo() {
           ))}
         </svg>
 
-        {/* Brand Identity - Using actual Logo Image */}
-        <div className="absolute left-[92px] top-[12px] flex flex-col pointer-events-none">
-          <motion.img
-            src="/kaizen-dhara-logo.png"
-            alt="Kaizen Dhara Logo"
+        {/* Brand Identity - Reverted to Text Branding */}
+        <div className="absolute left-[92px] top-[4px] flex flex-col pointer-events-none">
+          <motion.div
             initial={{ opacity: 0, x: -15 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: 0.6, duration: 1 }}
-            className="h-10 w-auto object-contain brightness-110"
-          />
+            className="flex items-baseline gap-2"
+          >
+            <span className="text-3xl font-extralight tracking-tight text-white/80">
+              Kaizen
+            </span>
+            <span className="text-3xl font-black tracking-tighter bg-gradient-to-r from-white via-cyan-100 to-white/60 bg-clip-text text-transparent uppercase italic">
+              Dhara
+            </span>
+          </motion.div>
 
           <motion.span
             initial={{ opacity: 0, y: 5 }}
