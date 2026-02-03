@@ -57,11 +57,21 @@ const HistorySidebar: React.FC<HistorySidebarProps> = ({
 
     const formatDate = (date: Date) => {
         const now = new Date();
-        const diff = now.getTime() - date.getTime();
-        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-        if (days === 0) return 'Today';
-        if (days === 1) return 'Yesterday';
-        return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const startOfYesterday = new Date(startOfToday);
+        startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+
+        if (date >= startOfToday) return 'Today';
+        if (date >= startOfYesterday) return 'Yesterday';
+
+        // Lifetime view: Show full date
+        return date.toLocaleDateString(undefined, {
+            year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
     };
 
     return (

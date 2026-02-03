@@ -11,7 +11,7 @@ export const saveToHistory = async (project: SDLCProject): Promise<void> => {
         id: project.id,
         prompt: project.prompt,
         name: project.name,
-        timestamp: new Date(),
+        timestamp: project.createdAt || new Date(),
         project: project,
         preview: project.requirements?.scope?.substring(0, 150) || 'No preview available',
     };
@@ -40,13 +40,44 @@ export const saveToHistory = async (project: SDLCProject): Promise<void> => {
     }
 };
 
+export const syncLocalStorageToBackend = async (): Promise<void> => {
+    try {
+        const localData = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (!localData) return;
+
+        const localHistory: HistoryItem[] = JSON.parse(localData);
+        if (localHistory.length === 0) return;
+
+        // Fetch backend history to see what's already there
+        const res = await fetch(`${API_BASE}/history`);
+        const backendHistory: HistoryItem[] = res.ok ? await res.json() : [];
+        const backendIds = new Set(backendHistory.map(item => item.id));
+
+        // Sync items that aren't in the backend
+        for (const item of localHistory) {
+            if (!backendIds.has(item.id)) {
+                await fetch(`${API_BASE}/history`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(item),
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Failed to sync legacy data:', error);
+    }
+};
+
 export const getHistory = async (): Promise<HistoryItem[]> => {
-    // 1. Try Backend first
+    let backendHistory: HistoryItem[] = [];
+    let localHistory: HistoryItem[] = [];
+
+    // 1. Try Backend
     try {
         const res = await fetch(`${API_BASE}/history`);
         if (res.ok) {
-            const history = await res.json();
-            return history.map((item: any) => ({
+            const data = await res.json();
+            backendHistory = data.map((item: any) => ({
                 ...item,
                 timestamp: new Date(item.timestamp),
                 project: {
@@ -57,24 +88,39 @@ export const getHistory = async (): Promise<HistoryItem[]> => {
             }));
         }
     } catch (error) {
-        console.warn('Backend fetch failed, falling back to LocalStorage.');
+        console.warn('Backend fetch failed.');
     }
 
-    // 2. Fallback to LocalStorage
+    // 2. Load LocalStorage
     try {
         const localData = localStorage.getItem(LOCAL_STORAGE_KEY);
         if (localData) {
-            const history = JSON.parse(localData);
-            return history.map((item: any) => ({
+            const data = JSON.parse(localData);
+            localHistory = data.map((item: any) => ({
                 ...item,
                 timestamp: new Date(item.timestamp),
+                project: {
+                    ...item.project,
+                    createdAt: item.project.createdAt ? new Date(item.project.createdAt) : undefined,
+                    completedAt: item.project.completedAt ? new Date(item.project.completedAt) : undefined,
+                },
             }));
         }
     } catch (e) {
         console.error('LocalStorage fetch failed:', e);
     }
 
-    return [];
+    // 3. Merge and Deduplicate (Sort by latest first)
+    const combined = [...backendHistory];
+    const backendIds = new Set(backendHistory.map(h => h.id));
+
+    for (const item of localHistory) {
+        if (!backendIds.has(item.id)) {
+            combined.push(item);
+        }
+    }
+
+    return combined.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
 };
 
 export const deleteHistoryItem = async (id: string): Promise<void> => {
@@ -193,6 +239,7 @@ export const storage = {
         delete: deleteHistoryItem,
         clear: clearHistory,
         search: searchHistory,
+        sync: syncLocalStorageToBackend,
     },
     preferences: {
         save: savePreferences,

@@ -33,14 +33,15 @@ const App: React.FC = () => {
 
   const hasApiKey = !!import.meta.env.VITE_OLLAMA_API_KEY || !!import.meta.env.VITE_GEMINI_API_KEY;
 
-  // Load preferences on mount
+  // Load preferences and sync history on mount
   useEffect(() => {
-    const loadPrefs = async () => {
+    const init = async () => {
       const prefs = await storage.preferences.get();
       setTheme(prefs.theme);
+      await storage.history.sync(); // Sync legacy data to backend
       inputRef.current?.focus();
     };
-    loadPrefs();
+    init();
   }, []);
 
   // Save preferences when theme changes
@@ -174,7 +175,9 @@ const App: React.FC = () => {
     try {
       // Generate Dynamic Name First
       const projectName = await agentService.current.runNamingAgent(inputCopy);
-      setProject(p => p ? { ...p, name: projectName } : null);
+      const updatedProject = { ...newProject, name: projectName };
+      setProject(updatedProject);
+      await storage.history.save(updatedProject); // Save instantly on naming
 
       addMessage('Orchestrator', `Initializing automated SDLC for: "${projectName}"`, 'thinking');
       await new Promise(r => setTimeout(r, 800));
@@ -190,7 +193,9 @@ const App: React.FC = () => {
       });
 
       setMessages(prev => prev.map(msg => msg.id === reqMsgId ? { ...msg, status: 'done' } : msg));
-      setProject(p => p ? { ...p, requirements: reqs, currentStep: 1 } : null);
+      const reqProj = { ...updatedProject, requirements: reqs, currentStep: 1 };
+      setProject(reqProj);
+      await storage.history.save(reqProj); // Update history
       addMessage('Requirement', `Scope defined. Extracted ${reqs.userStories.length} user stories.`);
 
       // Step 2: Design
@@ -204,7 +209,9 @@ const App: React.FC = () => {
       });
 
       setMessages(prev => prev.map(msg => msg.id === designMsgId ? { ...msg, status: 'done' } : msg));
-      setProject(p => p ? { ...p, design: design, currentStep: 2 } : null);
+      const designProj = { ...reqProj, design: design, currentStep: 2 };
+      setProject(designProj);
+      await storage.history.save(designProj); // Update history
       addMessage('Design', 'Architecture and design blueprints are complete.');
 
       // Step 3: Development
@@ -213,7 +220,9 @@ const App: React.FC = () => {
 
       const codeRes = await agentService.current.runDevelopmentAgent(design, reqs, theme, (chunk) => { });
 
-      setProject(p => p ? { ...p, code: codeRes, currentStep: 3 } : null);
+      const devProj = { ...designProj, code: codeRes, currentStep: 3 };
+      setProject(devProj);
+      await storage.history.save(devProj); // Update history
       addMessage('Development', 'Source code synthesis complete. Application is ready for verification.');
 
       // Step 4: Testing
@@ -229,11 +238,12 @@ const App: React.FC = () => {
       });
 
       setMessages(prev => prev.map(msg => msg.id === testMsgId ? { ...msg, status: 'done' } : msg));
-      setProject(p => p ? { ...p, tests: tests, currentStep: 4 } : null);
+      const finalProj = { ...devProj, tests: tests, isProcessing: false, currentStep: 5, completedAt: new Date() };
+      setProject(finalProj);
+      await storage.history.save(finalProj); // Final save
       addMessage('Testing', 'Verification complete. All tests passed. Launching preview...');
 
       // Final Transition
-      setProject(p => p ? { ...p, isProcessing: false, currentStep: 5, completedAt: new Date() } : null);
       addMessage('Orchestrator', 'Workflow complete. The application is now live in the Deliverables tab.');
 
       setTimeout(() => setActiveTab('output'), 1000);
