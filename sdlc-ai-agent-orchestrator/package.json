@@ -37,5 +37,10 @@
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
+  },
+  "overrides": {
+    "framer-motion-3d": {
+      "@react-three/fiber": "$@react-three/fiber"
+    }
   }
 }
