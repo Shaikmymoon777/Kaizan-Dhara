@@ -157,6 +157,18 @@ export class AgentService {
         return null;
     }
 
+    async runNamingAgent(prompt: string) {
+        const sys = `You are a Project Manager Agent. Given a user prompt for a software project, generate a short, professional, and catchy name for the project (2-4 words).
+    Output ONLY the name. No quotes, no preamble, no markdown.`;
+
+        try {
+            const res = await this.generate(`Project idea: ${prompt}`, sys, undefined, undefined, 'Orchestrator');
+            return res.replace(/"/g, '').trim() || 'Agent Project v1';
+        } catch (error) {
+            return 'Agent Project v1';
+        }
+    }
+
     async runRequirementAgent(prompt: string, onStream?: (chunk: string) => void) {
         const sys = `You are a Senior Business Analyst Agent. Extract requirements from the user prompt.
     Output as JSON with userStories (array of strings), scope (string), and assumptions (array of strings).

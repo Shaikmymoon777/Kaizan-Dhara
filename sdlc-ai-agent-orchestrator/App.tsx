@@ -155,10 +155,11 @@ const App: React.FC = () => {
       return;
     }
 
+    const inputCopy = input;
     const newProject: SDLCProject = {
       id: Date.now().toString(),
-      prompt: input,
-      name: 'Agent Project v1',
+      prompt: inputCopy,
+      name: 'Generating Name...',
       currentStep: 0,
       isProcessing: true,
       createdAt: new Date(),
@@ -166,11 +167,16 @@ const App: React.FC = () => {
     };
     setProject(newProject);
     setMessages([]);
+    setInput('');
     setActiveTab('flow');
     setDeliverableSubTab('preview');
 
     try {
-      addMessage('Orchestrator', `Initializing automated SDLC for: "${input}"`, 'thinking');
+      // Generate Dynamic Name First
+      const projectName = await agentService.current.runNamingAgent(inputCopy);
+      setProject(p => p ? { ...p, name: projectName } : null);
+
+      addMessage('Orchestrator', `Initializing automated SDLC for: "${projectName}"`, 'thinking');
       await new Promise(r => setTimeout(r, 800));
 
       // Step 1: Requirements
