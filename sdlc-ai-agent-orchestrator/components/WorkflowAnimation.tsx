@@ -1,139 +1,204 @@
 "use client";
 
-import React from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { Suspense, useMemo, useRef } from "react";
+import { Canvas, useFrame } from "@react-three/fiber";
+import { PerspectiveCamera, Float, MeshDistortMaterial, PointMaterial } from "@react-three/drei";
+import { motion, AnimatePresence } from "framer-motion";
+import * as THREE from "three";
 
 interface WorkflowAnimationProps {
     currentStep: number;
 }
 
-const WorkflowAnimation: React.FC<WorkflowAnimationProps> = ({ currentStep }) => {
+// ─── Data Flow Particles (Three.js) ─────────────────────────────────────────
+function DataParticles({ currentStep }: { currentStep: number }) {
+    const pointsRef = useRef<THREE.Points>(null!);
+    const count = 500;
+
+    // Create a subtle 3D path for particles to follow
+    const curve = useMemo(() => {
+        return new THREE.CatmullRomCurve3([
+            new THREE.Vector3(-10, 0, 0),
+            new THREE.Vector3(-6, 1, 0),
+            new THREE.Vector3(-2, -1, 0),
+            new THREE.Vector3(2, 1, 0),
+            new THREE.Vector3(6, -1, 0),
+            new THREE.Vector3(10, 0, 0),
+        ]);
+    }, []);
+
+    const particles = useMemo(() => {
+        const positions = new Float32Array(count * 3);
+        const offsets = new Float32Array(count);
+        for (let i = 0; i < count; i++) {
+            offsets[i] = Math.random();
+        }
+        return { positions, offsets };
+    }, []);
+
+    useFrame((state) => {
+        const time = state.clock.getElapsedTime() * 0.1;
+        const posAttribute = pointsRef.current.geometry.attributes.position;
+
+        for (let i = 0; i < count; i++) {
+            // Move particles along the curve based on time + their individual offset
+            const t = (time + particles.offsets[i]) % 1;
+            const point = curve.getPoint(t);
+            posAttribute.setXYZ(i, point.x, point.y + Math.sin(time * 10 + i) * 0.1, point.z);
+        }
+        posAttribute.needsUpdate = true;
+    });
+
+    return (
+        <points ref={pointsRef}>
+            <bufferGeometry>
+                <bufferAttribute
+                    attach="attributes-position"
+                    count={count}
+                    array={particles.positions}
+                    itemSize={3}
+                />
+            </bufferGeometry>
+            <PointMaterial
+                transparent
+                color="#6366f1"
+                size={0.05}
+                sizeAttenuation={true}
+                depthWrite={false}
+                blending={THREE.AdditiveBlending}
+                opacity={0.4}
+            />
+        </points>
+    );
+}
+
+// ─── 3D Node Artifact ──────────────────────────────────────────────────────
+function NodeArtifact({ position, active, color }: { position: [number, number, number]; active: boolean; color: string }) {
+    return (
+        <Float speed={active ? 4 : 1} rotationIntensity={active ? 2 : 0.5} floatIntensity={active ? 2 : 0.5}>
+            <mesh position={position}>
+                <sphereGeometry args={[active ? 0.6 : 0.3, 32, 32]} />
+                {active ? (
+                    <MeshDistortMaterial
+                        color={color}
+                        speed={4}
+                        distort={0.4}
+                        radius={1}
+                        metalness={0.8}
+                        roughness={0.2}
+                        emissive={color}
+                        emissiveIntensity={2}
+                    />
+                ) : (
+                    <meshStandardMaterial
+                        color="#1e293b"
+                        metalness={0.9}
+                        roughness={0.1}
+                        transparent
+                        opacity={0.5}
+                    />
+                )}
+            </mesh>
+        </Float>
+    );
+}
+
+// ─── Main Workflow Component ───────────────────────────────────────────────
+export default function WorkflowAnimation({ currentStep }: WorkflowAnimationProps) {
     const steps = [
-        { id: 1, name: 'Semantic Input', label: 'Prompt', color: '#6366f1' },
-        { id: 2, name: 'Logic Synthesis', label: 'Requirements', color: '#818cf8' },
-        { id: 3, name: 'Interface Weaving', label: 'Design', color: '#a5b4fc' },
-        { id: 4, name: 'Neural Coding', label: 'Development', color: '#06b6d4' },
-        { id: 5, name: 'Autonomous QA', label: 'Testing', color: '#22d3ee' },
-        { id: 6, name: 'Edge Deployment', label: 'Production', color: '#10b981' },
+        { id: 1, label: "Prompt", name: "Semantic Input", color: "#6366f1", pos: [-10, 0, 0] },
+        { id: 2, label: "Reqs", name: "Logic Synthesis", color: "#818cf8", pos: [-6, 1, 0] },
+        { id: 3, label: "Design", name: "Visual Weaving", color: "#a5b4fc", pos: [-2, -1, 0] },
+        { id: 4, label: "Dev", name: "Neural Coding", color: "#06b6d4", pos: [2, 1, 0] },
+        { id: 5, label: "Testing", name: "Autonomous QA", color: "#22d3ee", pos: [6, -1, 0] },
+        { id: 6, label: "Deploy", name: "Edge Pipeline", color: "#10b981", pos: [10, 0, 0] },
     ];
 
     return (
-        <div className="w-full max-w-5xl mx-auto py-4">
-            <div className="relative">
-                {/* DHARA PIPELINE TRACK (The Laser Line) */}
-                <div className="absolute top-1/2 left-0 right-0 h-[1px] bg-white/5 -translate-y-1/2">
-                    <motion.div
-                        className="h-full bg-gradient-to-r from-transparent via-indigo-500 to-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.8)]"
-                        initial={{ width: "0%" }}
-                        animate={{ width: `${((currentStep - 1) / (steps.length - 1)) * 100}%` }}
-                        transition={{ duration: 1, ease: "easeInOut" }}
-                    />
-                </div>
+        <div className="w-full h-full flex flex-col items-center justify-center py-4 relative">
 
-                {/* NEURAL NODES */}
-                <div className="relative flex justify-between items-center">
-                    {steps.map((step, index) => {
-                        const isActive = currentStep === step.id;
-                        const isCompleted = currentStep > step.id;
+            {/* 3D DHARA PIPELINE CANVAS */}
+            <div className="w-full h-64 relative z-10 cursor-grab active:cursor-grabbing">
+                <Canvas>
+                    <PerspectiveCamera makeDefault position={[0, 0, 12]} />
+                    <ambientLight intensity={0.5} />
+                    <pointLight position={[10, 10, 10]} intensity={1.5} color="#4f46e5" />
 
-                        return (
-                            <div key={step.id} className="relative flex flex-col items-center group">
-                                {/* Node Artifact */}
-                                <motion.div
-                                    animate={{
-                                        scale: isActive ? 1.2 : 1,
-                                        borderColor: isActive ? step.color : isCompleted ? step.color : 'rgba(255,255,255,0.1)',
-                                    }}
-                                    className={`
-                                        relative w-12 h-12 rounded-xl border flex items-center justify-center
-                                        bg-[#020205] backdrop-blur-3xl z-10 transition-all duration-500
-                                        ${isActive ? 'shadow-[0_0_25px_rgba(99,102,241,0.3)]' : ''}
-                                    `}
-                                >
-                                    {/* Inner Pulse Ring */}
-                                    {isActive && (
-                                        <motion.div 
-                                            className="absolute inset-0 rounded-xl border border-indigo-400"
-                                            animate={{ scale: [1, 1.4, 1], opacity: [0.5, 0, 0.5] }}
-                                            transition={{ repeat: Infinity, duration: 2 }}
-                                        />
-                                    )}
+                    <Suspense fallback={null}>
+                        <DataParticles currentStep={currentStep} />
 
-                                    {/* Status Indicator Core */}
-                                    <div className={`
-                                        w-2 h-2 rounded-full transition-all duration-500
-                                        ${isActive ? 'bg-white scale-125 shadow-[0_0_10px_#fff]' : isCompleted ? 'bg-indigo-500' : 'bg-white/10'}
-                                    `} />
+                        {steps.map((step) => (
+                            <NodeArtifact
+                                key={step.id}
+                                position={step.pos as [number, number, number]}
+                                active={currentStep === step.id}
+                                color={step.color}
+                            />
+                        ))}
 
-                                    {/* Scanning Line (Only Active) */}
-                                    {isActive && (
-                                        <div className="absolute inset-0 overflow-hidden rounded-xl">
-                                            <div className="w-full h-[1px] bg-indigo-400/50 animate-scan" />
-                                        </div>
-                                    )}
-                                </motion.div>
+                        {/* The Connecting Spline (Ghost Path) */}
+                        <mesh>
+                            <tubeGeometry args={[new THREE.CatmullRomCurve3(steps.map(s => new THREE.Vector3(...s.pos))), 64, 0.02, 8, false]} />
+                            <meshBasicMaterial color="#ffffff" transparent opacity={0.05} />
+                        </mesh>
+                    </Suspense>
+                </Canvas>
 
-                                {/* Metadata Labels */}
-                                <div className="absolute top-16 whitespace-nowrap flex flex-col items-center">
-                                    <span className={`
-                                        text-[9px] font-black tracking-[0.3em] uppercase italic transition-colors duration-500
-                                        ${isActive ? 'text-white' : isCompleted ? 'text-indigo-400' : 'text-slate-600'}
-                                    `}>
-                                        {step.label}
-                                    </span>
-                                    <span className={`
-                                        text-[8px] font-bold tracking-tight mt-1 transition-opacity duration-500
-                                        ${isActive ? 'opacity-100 text-slate-400' : 'opacity-0'}
-                                    `}>
-                                        {step.name}
-                                    </span>
-                                </div>
-                            </div>
-                        );
-                    })}
+                {/* Floating Labels Overlay (2D) */}
+                <div className="absolute inset-0 pointer-events-none flex justify-between items-center px-4">
+                    {steps.map((step) => (
+                        <div
+                            key={step.id}
+                            className={`flex flex-col items-center transition-all duration-700 ${currentStep === step.id ? 'opacity-100' : 'opacity-20'}`}
+                            style={{ width: '120px' }}
+                        >
+                            <span className="text-[10px] font-black tracking-[0.3em] uppercase italic text-white mb-20">
+                                {step.label}
+                            </span>
+                        </div>
+                    ))}
                 </div>
             </div>
 
-            {/* LIVE SYSTEM TELEMETRY */}
-            <div className="mt-20 flex justify-center h-10">
+            {/* LIVE TELEMETRY STATUS (Bottom) */}
+            <div className="mt-6 w-full max-w-2xl px-4 relative z-20">
                 <AnimatePresence mode="wait">
                     <motion.div
                         key={currentStep}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -10 }}
-                        className="flex items-center gap-4 bg-white/[0.02] border border-white/5 px-6 py-2 rounded-full backdrop-blur-2xl"
+                        initial={{ opacity: 0, y: 10, filter: "blur(10px)" }}
+                        animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                        exit={{ opacity: 0, y: -10, filter: "blur(10px)" }}
+                        className="flex items-center gap-6 bg-white/[0.03] border border-white/10 p-4 rounded-2xl backdrop-blur-3xl shadow-2xl"
                     >
-                        <div className="flex items-center gap-2">
-                            <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-pulse" />
-                            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400">
-                                Status: Flowing
-                            </span>
+                        <div className="flex items-center gap-3">
+                            <div className="relative flex h-3 w-3">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span>
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-[9px] font-black uppercase tracking-[0.2em] text-indigo-400">Flow Status</span>
+                                <span className="text-xs font-black text-white italic tracking-tight uppercase">{steps[Math.max(0, Math.min(steps.length - 1, currentStep - 1))].name}</span>
+                            </div>
                         </div>
-                        <div className="w-px h-3 bg-white/10" />
-                        <span className="text-[10px] font-bold text-slate-300 tracking-tight italic">
+
+                        <div className="w-px h-8 bg-white/10" />
+
+                        <p className="text-[11px] font-medium text-slate-400 italic">
                             {currentStep === 1 && "Semantic mapping of user intent..."}
-                            {currentStep === 2 && "Synthesizing logical dependencies..."}
-                            {currentStep === 3 && "Weaving design tokens into UI layers..."}
-                            {currentStep === 4 && "Compiling neural code blocks..."}
-                            {currentStep === 5 && "Running autonomous validation swarm..."}
-                            {currentStep === 6 && "Synchronizing with edge infrastructure..."}
-                        </span>
+                            {currentStep === 2 && "Synthesizing logical dependencies and constraints..."}
+                            {currentStep === 3 && "Weaving design tokens into autonomous UI layers..."}
+                            {currentStep === 4 && "Compiling neural code blocks and edge logic..."}
+                            {currentStep === 5 && "Initiating self-healing validation swarm..."}
+                            {currentStep === 6 && "Synchronizing artifact with global edge infrastructure..."}
+                        </p>
                     </motion.div>
                 </AnimatePresence>
             </div>
 
-            <style>{`
-                @keyframes scan {
-                    0% { transform: translateY(-5px); }
-                    100% { transform: translateY(50px); }
-                }
-                .animate-scan {
-                    animation: scan 2s linear infinite;
-                }
-            `}</style>
+            {/* Progress Counter */}
+            <div className="mt-4 text-[9px] font-bold tracking-[0.5em] text-slate-600 uppercase">
+                Step {currentStep} <span className="mx-2">/</span> 06
+            </div>
         </div>
     );
-};
-
-export default WorkflowAnimation;
+}
