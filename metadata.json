@@ -1,0 +1,5 @@
+{
+  "name": "SDLC AI Agent Orchestrator",
+  "description": "A sophisticated multi-agent platform that simulates a full SDLC workflow (BA, Architect, Dev, QA) using Gemini to generate software from simple prompts.",
+  "requestFramePermissions": []
+}
