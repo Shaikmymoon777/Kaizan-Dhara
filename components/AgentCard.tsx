@@ -40,6 +40,8 @@ const AgentCard: React.FC<AgentCardProps> = ({
   return (
     <motion.div
       onClick={(e) => {
+        // Never navigate away when waiting for approve/modify decision
+        if (isWaitingForApproval) return;
         // Prevent click if clicking buttons or textarea
         if ((e.target as HTMLElement).closest('button, textarea')) return;
         onClick?.();

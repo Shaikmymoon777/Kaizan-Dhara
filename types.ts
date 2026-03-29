@@ -1,5 +1,5 @@
 
-export type AgentRole = 'Orchestrator' | 'Requirement' | 'Design' | 'Development' | 'Testing' | 'User';
+export type AgentRole = 'Orchestrator' | 'Requirement' | 'Design' | 'Development' | 'Testing' | 'Parallel' | 'User';
 
 export interface AgentMessage {
   id: string;
@@ -26,7 +26,7 @@ export interface SDLCProject {
       id: string;
       story: string;
       acceptanceCriteria: string[];
-      priority: string
+      priority: string;
     }[];
     scope: string;
     technicalConstraints: string[];
@@ -50,7 +50,7 @@ export interface SDLCProject {
       id: string;
       description: string;
       status: string;
-      notes: string
+      notes: string;
     }[];
     codeAudit: string;
     identifiedIssues: string[];
@@ -58,6 +58,27 @@ export interface SDLCProject {
     results?: string;
     bugReports?: string;
   };
+  // ── Parallel Validation Pack Outputs ──────────────────────────
+  reqValidation?: {
+    score: number;
+    strengths: string[];
+    gaps: string[];
+    recommendation: string;
+  };
+  designReview?: {
+    score: number;
+    architectureRisks: string[];
+    recommendations: string[];
+    summary: string;
+  };
+  codeAnalysis?: {
+    score: number;
+    issuesFound: string[];
+    securityFlags: string[];
+    a11yGaps: string[];
+    summary: string;
+  };
+  // ──────────────────────────────────────────────────────────────
   currentStep: number;
   waitingForApproval?: boolean;
   isProcessing: boolean;

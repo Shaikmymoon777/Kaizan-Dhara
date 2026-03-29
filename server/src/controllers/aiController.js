@@ -13,8 +13,8 @@ const generateContent = async (req, res) => {
         console.log('Using API Key (trimmed) starting with:', apiKey.substring(0, 4), 'Length:', apiKey.length);
 
         const ai = new GoogleGenAI({ apiKey });
-        // Revert to stable gemini-2.5-flash as gemini-1.5-flash is not found in this environment
-        const modelName = model || 'gemini-2.5-flash';
+        // Using gemini-3-flash-preview as default
+        const modelName = model || 'gemini-3-flash-preview';
 
         console.log(`Forwarding AI request to ${modelName} via unified SDK...`);
 

@@ -45,17 +45,27 @@ export class OpenAIService {
   }
 
   async runRequirementAgent(prompt: string) {
-    const sys = `You are a Senior Business Analyst Agent. Extract requirements from the user prompt. 
-    Output as JSON with userStories (array), scope (string), and assumptions (array).`;
+    const sys = `You are a Senior Lead Business Analyst and Product Architect. 
+    Your goal is to produce a highly detailed, comprehensive, and professional Product Requirements Document (PRD).
+    
+    ### Guidelines:
+    1. **Comprehensive Depth**: Do not hold back on detail. Explore edge cases and user personas.
+    2. **Professional Structure**: Organize information logically into actionable user stories with exhaustive acceptance criteria.
+    3. **Holistic View**: Include data entities, technical constraints, and a clear executive vision.
+    
+    Output strictly as JSON.`;
 
     const schema = {
       type: 'object',
       properties: {
-        userStories: { type: 'array', items: { type: 'string' } },
+        projectTitle: { type: 'string' },
+        executiveSummary: { type: 'string' },
+        userStories: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, story: { type: 'string' }, description: { type: 'string' }, acceptanceCriteria: { type: 'array', items: { type: 'string' } }, priority: { type: 'string' } } } },
         scope: { type: 'string' },
-        assumptions: { type: 'array', items: { type: 'string' } }
+        technicalConstraints: { type: 'array', items: { type: 'string' } },
+        dataEntities: { type: 'array', items: { type: 'string' } }
       },
-      required: ["userStories", "scope", "assumptions"]
+      required: ["projectTitle", "executiveSummary", "userStories", "scope", "technicalConstraints", "dataEntities"]
     };
 
     const res = await this.generate(`User request: ${prompt}`, sys, schema);
@@ -63,8 +73,16 @@ export class OpenAIService {
   }
 
   async runDesignAgent(requirements: any, theme?: string, feedback?: string) {
-    const sys = `You are a System & UI/UX Architect Agent. Design the architecture and wireframe structure based on requirements. 
-    Output JSON with architecture (markdown), wireframes (markdown/description), and apiContracts (markdown).`;
+    const sys = `You are a Principal Software Architect and Lead UI/UX Strategist.
+    Translate complex requirements into a sophisticated, detailed technical design blueprint.
+    
+    ### Requirements:
+    1. **Architectural Blueprints**: Provide system architecture, state management flow, and component communication plans.
+    2. **UX Strategy**: Extensive textual descriptions of the UI/UX journey and micro-interaction specifications.
+    3. **Premium Design Language**: Apply the '${theme || 'Modern Obsidian'}' theme with extreme precision. 
+       - Specify vibrant, harmonious color palettes, sophisticated typography, sleek dark modes, and glassmorphism effects.
+    
+    Output strictly as JSON.`;
 
     const prompt = `Requirements: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback for Refinement: ${feedback}` : ''}`;
     const res = await this.generate(
@@ -73,11 +91,13 @@ export class OpenAIService {
       {
         type: 'object',
         properties: {
-          architecture: { type: 'string' },
+          architectureDiagram: { type: 'string' },
+          componentStructure: { type: 'array', items: { type: 'string' } },
           wireframes: { type: 'string' },
-          apiContracts: { type: 'string' }
+          apiEndpoints: { type: 'array', items: { type: 'string' } },
+          designSystem: { type: 'string' }
         },
-        required: ["architecture", "wireframes", "apiContracts"]
+        required: ["architectureDiagram", "componentStructure", "wireframes", "apiEndpoints", "designSystem"]
       }
     );
 
@@ -85,20 +105,21 @@ export class OpenAIService {
   }
 
   async runDevelopmentAgent(design: any, requirements: any, prompt: string, theme?: string, feedback?: string) {
-    const sys = `You are a Lead Frontend Engineer Agent. Create a high-fidelity, polished, and fully functional React application (Single File).
+    const sys = `You are an elite 10x Full-Stack Engineer. Your task is to build a "Production-Ready", 100% complete React application.
 
-    ### TECHNICAL SPECIFICATION
-    - LANGUAGE: React (JSX or TSX).
-    - STYLING: Use Tailwind CSS classes exclusively. Focus on modern aesthetics, gradients, and subtle shadows.
-    - ICONS: Use 'lucide-react'.
-    - EXPORT: Ensure the main application component is the 'default' export.
-    - CONTENT: All requested features in the requirements must be implemented in the UI.
-    - QUALITY: The UI should feel professional, responsive, and "production-ready".
+    ### CORE MANDATE:
+    1. **Zero Placeholders**: Every feature, section, and component defined in the design MUST be fully implemented. "TODO" comments or empty sections are strictly forbidden.
+    2. **High Architectural Fidelity**: Synthesize code that is 100% accurate to the provided User Stories and Architectural Blueprints.
+    3. **Functional Completeness**: Implement real application logic (state management, event handlers, form validations) so the site is "ready to ship".
+    4. **Premium UI/UX**: Create a design that is visually stunning, futuristic, and premium. Use sophisticated typography, glassmorphism, and smooth Framer Motion animations.
+    
+    ### CONSTRAINTS:
+    - The ENTIRE application MUST be in a single monolithic file.
+    - NEVER use import.meta.env or process.env.
+    - Hardcode API base URL: const API_BASE = 'http://localhost:3001';
     
     ### OUTPUT FORMAT
-    - Return ONLY the raw code. 
-    - No markdown formatting (no \`\`\` blocks).
-    - No pre-amble or post-amble text.`;
+    - Return ONLY the raw code. No markdown code blocks.`;
 
     const context = `Project Context:
       Requirements: ${JSON.stringify(requirements)}
@@ -106,7 +127,9 @@ export class OpenAIService {
       User Goal: ${prompt}
       ${feedback ? `\nUser Feedback for Refinement: ${feedback}` : ''}
       
-      Generate the complete application code now. Ensure it is a single-file React component exported as default.`;
+      ACTION: Synthesize the absolute complete, high-performance Full-Stack code now. 
+      Ensure the generated website is the MOST ACCURATE representation of the original user vision (${prompt}).
+      Render every component with full logic. Ready for production.`;
 
     return await this.generate(context, sys);
   }
