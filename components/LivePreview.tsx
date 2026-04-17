@@ -28,8 +28,8 @@ function preprocessCode(raw: string): string {
     .replace(/import\.meta\.env/g, "({DEV:false,PROD:true,MODE:'production',BASE_URL:'/'})");
 
   // 3. Remove internal relative imports (they can't resolve in the sandbox)
-  // Improved regex to handle leading spaces and multiple variants (@/, ./, ../, etc.)
-  raw = raw.replace(/^\s*import\s+.*\s+from\s+['"](@\/|\.|\.\.).*['"]\s*;?/gm, '// [internal import removed]');
+  // This now handles multiline imports and various path formats (@/, ./, ../)
+  raw = raw.replace(/import\s+[\s\S]*?\s+from\s+['"](@\/|\.|\.\.).*?['"]\s*;?/g, '// [internal import removed]');
 
   // 4. Replace Tailwind arbitrary font family values that break Babel
   // e.g. font-['Inter'] -> font-sans  (Babel chokes on the single-quotes inside JSX strings)
@@ -118,22 +118,99 @@ const LivePreview: React.FC<LivePreviewProps> = ({ code }) => {
     if (typeof code === 'string') {
       rawCode = code.trim();
     } else {
-      const keys = Object.keys(code);
+      const allKeys = Object.keys(code);
+      // Filter for frontend files only (src/, frontend/, public/) and exclude backend/server code
+      // Also exclude common bootstrap files that try to render to #root themselves, as LivePreview handles that.
+      const keys = allKeys.filter(k => 
+        (k.startsWith('src/') || k.startsWith('frontend/') || k.startsWith('public/') || !k.includes('/')) && 
+        /\.(jsx|tsx|js|ts|css)$/.test(k) &&
+        !k.endsWith('main.jsx') && !k.endsWith('main.tsx') && !k.endsWith('index.html')
+      );
+
       const findKey = (suffix: string) => keys.find(k => k.endsWith(suffix));
-      const entryKey = findKey('App.tsx') || findKey('index.tsx') || findKey('App.jsx') || findKey('index.jsx');
+      const entryKey = findKey('App.tsx') || findKey('App.jsx') || findKey('index.tsx') || findKey('index.jsx');
       
-      // Separate entry from support files
       const entryContent = entryKey ? (code as Record<string, string>)[entryKey] : (Object.values(code)[0] || '');
       const otherFiles = keys.filter(k => k !== entryKey);
       
-      // Concatenate support files (stripping export default so they don't collision)
-      const supportCode = otherFiles.map(f => {
-         let content = (code as Record<string, string>)[f];
-         content = content.replace(/export\s+default\s+/g, '// [stripped] export default ');
-         return `// FILE: ${f}\n${content}`;
-      }).join('\n\n');
+      const allFiles = [...otherFiles.map(f => ({ name: f, content: (code as Record<string, string>)[f] })), { name: entryKey || 'src/App.jsx', content: entryContent }];
       
-      rawCode = supportCode + '\n\n' + '// --- ENTRY POINT ---\n' + entryContent;
+      const externalImports: string[] = [];
+      const codeBodies: string[] = [];
+
+      allFiles.forEach(file => {
+         let body = file.content;
+         
+         // SPECIAL: Handle CSS files by injecting them into document head
+         if (file.name.endsWith('.css')) {
+            codeBodies.push(`// CSS FILE: ${file.name}\n(function() { const s = document.createElement('style'); s.textContent = ${JSON.stringify(body)}; document.head.appendChild(s); })();`);
+            return;
+         }
+
+         // 1. Extract all external imports (those not starting with . or @/)
+         const importRegex = /^import\s+[\s\S]*?\s+from\s+['"](?!\.|\.\.|@\/)[^'"]+['"]\s*;?/gm;
+         const matches = body.match(importRegex);
+         if (matches) {
+            matches.forEach(m => externalImports.push(m.trim()));
+            body = body.replace(importRegex, '');
+         }
+
+         // 2. Remove internal relative imports
+         body = body.replace(/import\s+[\s\S]*?\s+from\s+['"](@\/|\.|\.\.).*?['"]\s*;?/g, '// [internal import removed]');
+
+         // 3. Clean exports for support files and bind to window
+         if (file.name !== entryKey) {
+            const fileName = file.name.split('/').pop()?.split('.')[0] || 'Component';
+            const safeName = fileName.replace(/[^a-zA-Z0-9]/g, '_');
+
+            // Handle default function exports: export default function Name()
+            const namedFuncRegex = /export\s+default\s+function\s+([A-Za-z0-9_]+)?\s*\(/;
+            if (namedFuncRegex.test(body)) {
+               const match = body.match(namedFuncRegex);
+               const nameToUse = match?.[1] || safeName;
+               body = body.replace(namedFuncRegex, `function ${nameToUse}(`);
+               body += `\nwindow.${nameToUse} = ${nameToUse};`;
+            } else if (/export\s+default\s+function\s*\(/.test(body)) {
+               // Anonymous default export: export default function()
+               body = body.replace(/export\s+default\s+function\s*\(/, `function ${safeName}(`);
+               body += `\nwindow.${safeName} = ${safeName};`;
+            } else if (/export\s+default\s+(const|let|var|class)\s+([A-Za-z0-9_]+)/.test(body)) {
+               // Named variable/class default export: export default const Name =
+               body = body.replace(/export\s+default\s+(const|let|var|class)\s+([A-Za-z0-9_]+)/, `$1 $2`);
+               const match = body.match(/(?:const|let|var|class)\s+([A-Za-z0-9_]+)/);
+               if (match?.[1]) body += `\nwindow.${match[1]} = ${match[1]};`;
+            } else if (/export\s+default\s+([\w]+);?/.test(body)) {
+               // Standalone default export: export default Name;
+               const match = body.match(/export\s+default\s+([\w]+);?/);
+               if (match?.[1]) body += `\nwindow.${match[1]} = ${match[1]};`;
+               body = body.replace(/export\s+default\s+[\w]+;?/g, '// [stripped standalone export]');
+            }
+
+            // [NEW] Handle manual window assignments if found in code
+            body = body.replace(/window\.([A-Za-z0-9_]+)\s*=\s*([A-Za-z0-9_]+);?/g, (m, g1, g2) => {
+               if (g1 === g2) return `window.${g1} = ${g1};`;
+               return m;
+            });
+
+            // Clean up remaining exports
+            body = body.replace(/export\s+\{\s*[\w]+\s+as\s+default\s*\};?/g, '// [stripped brace export]');
+            body = body.replace(/export\s+(function|const|let|var|class)\s+/g, '$1 ');
+            body = body.replace(/export\s+\{[\s\S]*?\};?/g, '// [stripped named brace export]');
+         } else {
+            // Even for the entry file (App.jsx), ensure if there's a default export, it's bound as window.App
+            const match = body.match(/export\s+default\s+(?:function|const|let|var|class)?\s*([A-Za-z0-9_]+)/);
+            if (match?.[1]) {
+               body += `\nwindow.App = ${match[1]}; \nwindow.${match[1]} = ${match[1]};`;
+            }
+         }
+
+         codeBodies.push(`// FILE: ${file.name}\n${body}`);
+      });
+
+      // Deduplicate imports
+      const uniqueImports = Array.from(new Set(externalImports));
+      
+      rawCode = uniqueImports.join('\n') + '\n\n' + codeBodies.join('\n\n');
     }
 
     // Pre-process the code before handing to Babel
@@ -163,10 +240,10 @@ const LivePreview: React.FC<LivePreviewProps> = ({ code }) => {
     <script type="importmap">
       {
         "imports": {
-          "react": "https://esm.sh/react@19.0.0",
-          "react/": "https://esm.sh/react@19.0.0/",
-          "react-dom": "https://esm.sh/react-dom@19.0.0?external=react",
-          "react-dom/client": "https://esm.sh/react-dom@19.0.0/client?external=react",
+          "react": "https://esm.sh/react@18.3.1",
+          "react/": "https://esm.sh/react@18.3.1/",
+          "react-dom": "https://esm.sh/react-dom@18.3.1?external=react",
+          "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
           "lucide-react": "https://esm.sh/lucide-react@0.474.0?external=react",
           "framer-motion": "https://esm.sh/framer-motion@11.11.11?external=react",
           "clsx": "https://esm.sh/clsx@2.1.1",
@@ -174,7 +251,13 @@ const LivePreview: React.FC<LivePreviewProps> = ({ code }) => {
           "recharts": "https://esm.sh/recharts@2.15.0?external=react",
           "date-fns": "https://esm.sh/date-fns@4.1.0",
           "react-router-dom": "https://esm.sh/react-router-dom@6.28.0?external=react",
-          "axios": "https://esm.sh/axios@1.7.9?external=react"
+          "axios": "https://esm.sh/axios@1.7.9?external=react",
+          "zustand": "https://esm.sh/zustand@4.5.2?external=react",
+          "zustand/middleware": "https://esm.sh/zustand@4.5.2/middleware?external=react",
+          "@react-three/fiber": "https://esm.sh/@react-three/fiber@8.17.10?external=react,react-dom,three",
+          "@react-three/drei": "https://esm.sh/@react-three/drei@9.117.3?external=react,react-dom,three,@react-three/fiber",
+          "three": "https://esm.sh/three@0.170.0",
+          "three-stdlib": "https://esm.sh/three-stdlib@2.34.0?external=three"
         }
       }
     </script>
@@ -248,10 +331,53 @@ const LivePreview: React.FC<LivePreviewProps> = ({ code }) => {
       import React from 'react';
       import { createRoot } from 'react-dom/client';
 
+      // Global Hook Injection: Ensure hooks are available even if imports are stripped or hoisted
+      window.React = React;
+      window.useState = React.useState;
+      window.useEffect = React.useEffect;
+      window.useContext = React.useContext;
+      window.useMemo = React.useMemo;
+      window.useCallback = React.useCallback;
+      window.useRef = React.useRef;
+      window.useLayoutEffect = React.useLayoutEffect;
+      
+      // Global Component Guard: Fallbacks for common missing symbols
+      (function() {
+        const fallbacks = ['Header', 'Navbar', 'Footer', 'Hero', 'Services', 'Contact', 'Portfolio', 'Testimonials'];
+        fallbacks.forEach(name => {
+          if (typeof window[name] === 'undefined' || window[name] === null) {
+            window[name] = function(props) {
+              return React.createElement('div', { 
+                className: 'p-4 bg-rose-50 border border-dashed border-rose-200 text-rose-500 text-[10px] font-mono rounded-lg mb-4',
+                style: { display: 'block' }
+              }, '[Symbol Missing: <' + name + ' />] - The AI skipped generating this component or used a mismatched name.');
+            };
+          }
+        });
+
+        // Lucide Icon Guard: Prevent crashes from hallucinated icon names
+        window.__LUCIDE_ICON_PROXY__ = new Proxy({}, {
+          get: (target, prop) => {
+            if (typeof prop === 'string' && prop !== 'displayName' && prop !== '$$typeof' && prop !== 'default') {
+              return function(props) {
+                return React.createElement('span', { 
+                  className: 'inline-flex items-center justify-center w-5 h-5 bg-slate-100 text-slate-400 rounded-sm text-[8px] font-bold border border-slate-200',
+                  title: 'Icon "' + prop + '" missing'
+                }, prop[0] || '?');
+              };
+            }
+            return undefined;
+          }
+        });
+      })();
+
       const base64Code = "${base64Code}";
       const decodedCode = new TextDecoder().decode(
         Uint8Array.from(atob(base64Code), c => c.charCodeAt(0))
       );
+      
+      // DEBUG: Make the final synthesized code accessible via console if needed
+      window.__PREVIEW_CODE__ = decodedCode;
 
       async function waitForBabel() {
         if (typeof Babel !== 'undefined') return;
@@ -290,9 +416,19 @@ const LivePreview: React.FC<LivePreviewProps> = ({ code }) => {
           const module = await import(url);
           URL.revokeObjectURL(url);
 
-          const App = module.default;
+          // ADVANCED RESOLUTION: Priority order for finding the main App component
+          let App = module.default || window.App || module.App;
+          
+          // Final fallback: Search window for ANY major components if App is still missing
           if (!App) {
-            throw new Error("No default export found in the generated code. Make sure the component uses 'export default'.");
+             const priorities = ['App', 'Layout', 'Portfolio', 'Landing', 'Website', 'Main'];
+             for (const name of priorities) {
+                if (window[name]) { App = window[name]; break; }
+             }
+          }
+          
+          if (!App) {
+            throw new Error("No App component found. Ensure entry file has 'export default' or define 'App' component.");
           }
 
           const root = createRoot(document.getElementById('root'));

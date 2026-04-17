@@ -19,7 +19,7 @@ import { AgentMessage, SDLCProject } from "./types";
 import AgentCard from "./components/AgentCard";
 import ChatSidebar from "./components/ChatSidebar";
 import HistorySidebar from "./components/HistorySidebar";
-import SearchBar from "./components/SearchBar";
+
 import LivePreview from "./components/LivePreview";
 import HomePage from "./components/HomePage";
 import LoginScreen from "./components/LoginScreen";
@@ -27,44 +27,7 @@ import GithubDeployModal from "./components/GithubDeployModal";
 import AnimatedLogo from "./components/AnimatedLogo";
 
 import { storage } from "./utils/storage";
-import mermaid from "mermaid";
-
-mermaid.initialize({
-  startOnLoad: false,
-  theme: "dark",
-  securityLevel: "loose",
-  fontFamily: "monospace",
-});
-
-// A small functional component to safely render Mermaid Markdown into SVGs
-const MermaidDiagram = ({ chart }: { chart: string }) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (containerRef.current && chart) {
-      mermaid
-        .render(`mermaid-${Math.random().toString(36).substring(7)}`, chart)
-        .then((result) => {
-          if (containerRef.current) {
-            containerRef.current.innerHTML = result.svg;
-          }
-        })
-        .catch((e) => {
-          console.error("Mermaid Render Error", e);
-          if (containerRef.current) {
-            containerRef.current.innerHTML = `<pre class="text-[10px] text-rose-400">Failed to render diagram: ${e.message}</pre>`;
-          }
-        });
-    }
-  }, [chart]);
-
-  return (
-    <div
-      ref={containerRef}
-      className="mermaid-container flex justify-center py-4 overflow-x-auto"
-    />
-  );
-};
+import ArtifactsDashboard from "./components/ArtifactsDashboard";
 
 type ViewState = "landing" | "login" | "studio";
 
@@ -92,7 +55,7 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
-  const [selectedTheme, setSelectedTheme] = useState("Modern Obsidian");
+  const [selectedTheme] = useState("Modern Obsidian"); // Keeping as default for agent logic
   const [attachments, setAttachments] = useState<any[]>([]);
   const [isPreviewFullScreen, setIsPreviewFullScreen] = useState(false);
   const [isDeployModalOpen, setIsDeployModalOpen] = useState(false);
@@ -133,6 +96,90 @@ const App: React.FC = () => {
       // Do not initialize a service, let it be null. handleStart will check for this.
     }
   }, []);
+
+  // PERSISTENCE: Restore state from localStorage
+  useEffect(() => {
+    const savedProject = localStorage.getItem("sdlc_active_project");
+    const savedMessages = localStorage.getItem("sdlc_messages");
+    
+    if (savedProject) {
+      try {
+        setProject(JSON.parse(savedProject));
+      } catch (e) {
+        console.error("Failed to restore project", e);
+      }
+    }
+    
+    if (savedMessages) {
+      try {
+        setMessages(JSON.parse(savedMessages));
+      } catch (e) {
+        console.error("Failed to restore messages", e);
+      }
+    }
+
+    const savedInput = localStorage.getItem("sdlc_input");
+    if (savedInput) {
+      setInput(savedInput);
+    }
+
+    const savedTabs = localStorage.getItem("sdlc_tabs");
+    if (savedTabs) {
+      try {
+        const { active, sub } = JSON.parse(savedTabs);
+        if (active) setActiveTab(active);
+        if (sub) setDeliverableSubTab(sub);
+      } catch (e) {}
+    }
+  }, []);
+
+  // PERSISTENCE: Save tabs/input
+  useEffect(() => {
+    localStorage.setItem("sdlc_input", input);
+  }, [input]);
+
+  useEffect(() => {
+    localStorage.setItem("sdlc_tabs", JSON.stringify({ active: activeTab, sub: deliverableSubTab }));
+  }, [activeTab, deliverableSubTab]);
+
+  // Clean up stuck isProcessing state on project restoration
+  useEffect(() => {
+    if (project?.isProcessing) {
+      setProject(p => p ? { ...p, isProcessing: false } : null);
+      addMessage("Orchestrator", "Session restored. A previous automated process was interrupted. You can resume by clicking the pending action.");
+    }
+    
+    // If input is empty but we have a project, restore prompt to input for convenience
+    if (!input && project?.prompt) {
+      setInput(project.prompt);
+    }
+  }, [project?.id]); // Run when project ID changes (e.g. on restoration)
+
+  // PERSISTENCE: Save state to localStorage with Quota Safety
+  useEffect(() => {
+    if (project) {
+      try {
+        localStorage.setItem("sdlc_active_project", JSON.stringify(project));
+      } catch (e) {
+        console.warn("Project Too Large for LocalStorage - Persistence Disabled for this session", e);
+        // We don't want to crash the whole app if storage fails.
+      }
+    } else {
+      localStorage.removeItem("sdlc_active_project");
+    }
+  }, [project]);
+
+  useEffect(() => {
+    if (messages.length > 0) {
+      try {
+        localStorage.setItem("sdlc_messages", JSON.stringify(messages));
+      } catch (e) {
+        console.warn("Messages Too Large for LocalStorage", e);
+      }
+    } else {
+      localStorage.removeItem("sdlc_messages");
+    }
+  }, [messages]);
 
   const addMessage = (
     role: any,
@@ -857,10 +904,6 @@ const App: React.FC = () => {
             <AnimatedLogo />
           </div>
         </div>
-
-        {/* Center: Search Bar */}
-        <SearchBar onAttach={() => fileInputRef.current?.click()} />
-
         <div className="flex items-center gap-4">
           <div className="flex gap-2 bg-slate-900 p-1 rounded-xl border border-slate-800">
             <button
@@ -1012,24 +1055,7 @@ const App: React.FC = () => {
                 </button>
               </div>
 
-              {/* Theme Selector */}
-              <div className="mt-4">
-                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block mb-2">
-                  Visual Theme
-                </label>
-                <select
-                  value={selectedTheme}
-                  onChange={(e) => setSelectedTheme(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-700/50 rounded-xl px-4 py-3 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all font-bold tracking-wider"
-                >
-                  <option>Modern Obsidian</option>
-                  <option>Ocean Breeze</option>
-                  <option>Cyberpunk Neon</option>
-                  <option>Minimalist White</option>
-                  <option>Forest Echo</option>
-                </select>
-              </div>
-
+              {/* Theme Selector Removed */}
               {/* Attachments Display */}
               {attachments.length > 0 && (
                 <div className="mt-4 flex flex-wrap gap-2">
@@ -1626,624 +1652,9 @@ const App: React.FC = () => {
                     </div>
                   )}
 
-                  {deliverableSubTab === "docs" && (
-                    <div className="flex-1 flex flex-col min-h-0 animate-in fade-in slide-in-from-left-4 duration-500">
-                      {/* Artifact Filter Bar */}
-                      <div className="flex items-center justify-between mb-6 px-2">
-                        <h2 className="text-xl font-bold text-slate-200 tracking-tight">
-                          Project Documentation
-                        </h2>
-                      </div>
-
-                      <div className="flex-1 flex flex-col gap-10 overflow-y-auto pr-4 pb-12 max-w-5xl mx-auto w-full">
-                        {/* PARALLEL VALIDATION SCORES — shown if any validation is available */}
-                        {(project?.reqValidation || project?.designReview || project?.codeAnalysis) && (
-                          <div className="col-span-full mb-2">
-                            <div className="flex items-center gap-2 mb-3">
-                              <div className="w-2 h-2 rounded-full bg-violet-500 animate-pulse" />
-                              <span className="text-[10px] font-black text-violet-400 uppercase tracking-widest">Parallel Validation Pack Results</span>
-                            </div>
-                            <div className="grid grid-cols-3 gap-4">
-                              {project?.reqValidation && (
-                                <div className={`p-4 rounded-2xl border ${(project.reqValidation.score ?? 0) >= 80 ? 'bg-emerald-950/30 border-emerald-900/50' : (project.reqValidation.score ?? 0) >= 60 ? 'bg-amber-950/30 border-amber-900/50' : 'bg-rose-950/30 border-rose-900/50'}`}>
-                                  <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Req Quality</div>
-                                  <div className={`text-2xl font-black mb-1 ${(project.reqValidation.score ?? 0) >= 80 ? 'text-emerald-400' : (project.reqValidation.score ?? 0) >= 60 ? 'text-amber-400' : 'text-rose-400'}`}>{project.reqValidation.score ?? '--'}<span className="text-sm font-medium">/100</span></div>
-                                  <div className="text-[10px] text-slate-400 leading-relaxed">{project.reqValidation.recommendation}</div>
-                                  {(project.reqValidation.gaps ?? []).length > 0 && (
-                                    <div className="mt-2 space-y-0.5">
-                                      {(project.reqValidation.gaps ?? []).slice(0, 3).map((g, i) => (
-                                        <div key={i} className="text-[9px] text-amber-400/80">⚠ {g}</div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                              {project?.designReview && (
-                                <div className={`p-4 rounded-2xl border ${(project.designReview.score ?? 0) >= 80 ? 'bg-emerald-950/30 border-emerald-900/50' : (project.designReview.score ?? 0) >= 60 ? 'bg-amber-950/30 border-amber-900/50' : 'bg-rose-950/30 border-rose-900/50'}`}>
-                                  <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Design Review</div>
-                                  <div className={`text-2xl font-black mb-1 ${(project.designReview.score ?? 0) >= 80 ? 'text-emerald-400' : (project.designReview.score ?? 0) >= 60 ? 'text-amber-400' : 'text-rose-400'}`}>{project.designReview.score ?? '--'}<span className="text-sm font-medium">/100</span></div>
-                                  <div className="text-[10px] text-slate-400 leading-relaxed">{project.designReview.summary}</div>
-                                  {(project.designReview.architectureRisks ?? []).length > 0 && (
-                                    <div className="mt-2 space-y-0.5">
-                                      {(project.designReview.architectureRisks ?? []).slice(0, 3).map((r, i) => (
-                                        <div key={i} className="text-[9px] text-amber-400/80">⚠ {r}</div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                              {project?.codeAnalysis && (
-                                <div className={`p-4 rounded-2xl border ${(project.codeAnalysis.score ?? 0) >= 80 ? 'bg-emerald-950/30 border-emerald-900/50' : (project.codeAnalysis.score ?? 0) >= 60 ? 'bg-amber-950/30 border-amber-900/50' : 'bg-rose-950/30 border-rose-900/50'}`}>
-                                  <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Code Analysis</div>
-                                  <div className={`text-2xl font-black mb-1 ${(project.codeAnalysis.score ?? 0) >= 80 ? 'text-emerald-400' : (project.codeAnalysis.score ?? 0) >= 60 ? 'text-amber-400' : 'text-rose-400'}`}>{project.codeAnalysis.score ?? '--'}<span className="text-sm font-medium">/100</span></div>
-                                  <div className="text-[10px] text-slate-400 leading-relaxed">{project.codeAnalysis.summary}</div>
-                                  {(project.codeAnalysis.securityFlags ?? []).length > 0 && (
-                                    <div className="mt-2 space-y-0.5">
-                                      {(project.codeAnalysis.securityFlags ?? []).slice(0, 3).map((f, i) => (
-                                        <div key={i} className="text-[9px] text-rose-400/80">🔒 {f}</div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="space-y-8">
-                          {/* REQUIREMENT SPEC */}
-                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  req: !prev.req,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-lg bg-cyan-600/20 text-cyan-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                                    ></path>
-                                  </svg>
-                                </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Requirement Spec
-                                </h3>
-                              </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.req ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
-                              </div>
-                            </button>
-                            {expandedDocs.req && (
-                              <div className="mt-4">
-                                {project?.requirements ? (
-                                  <div className="space-y-6">
-                                    {project.requirements.executiveSummary && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-xs text-slate-400 leading-relaxed italic">
-                                        {project.requirements.executiveSummary}
-                                      </div>
-                                    )}
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                        User Stories & Acceptance Criteria
-                                      </h4>
-                                      <ul className="space-y-4">
-                                        {(Array.isArray(
-                                          project.requirements.userStories,
-                                        )
-                                          ? project.requirements.userStories
-                                          : []
-                                        ).map((s: any, i: number) => (
-                                          <li
-                                            key={i}
-                                            className="text-xs text-slate-400 bg-slate-800/30 p-3 rounded-xl border border-slate-800/50"
-                                          >
-                                              <div className="flex-1">
-                                                <div className="flex gap-2 mb-1.5">
-                                                  <span className="text-cyan-500 font-mono font-bold">
-                                                    #{s.id || i + 1}
-                                                  </span>
-                                                  <span className="font-medium text-slate-200">
-                                                    {typeof s === "string"
-                                                      ? s
-                                                      : s.story}
-                                                  </span>
-                                                  {s.priority && (
-                                                    <span
-                                                      className={`ml-auto text-[9px] uppercase font-bold px-2 py-0.5 rounded-full ${s.priority === "High" ? "bg-rose-500/20 text-rose-400" : "bg-slate-700 text-slate-400"}`}
-                                                    >
-                                                      {s.priority}
-                                                    </span>
-                                                  )}
-                                                </div>
-                                                {s.description && (
-                                                  <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
-                                                    {s.description}
-                                                  </p>
-                                                )}
-                                              </div>
-
-                                            {Array.isArray(
-                                              s.acceptanceCriteria,
-                                            ) &&
-                                              s.acceptanceCriteria.length >
-                                                0 && (
-                                                <ul className="pl-8 space-y-1 list-disc marker:text-slate-600">
-                                                  {s.acceptanceCriteria.map(
-                                                    (ac: string, j: number) => (
-                                                      <li
-                                                        key={j}
-                                                        className="text-slate-500"
-                                                      >
-                                                        {ac}
-                                                      </li>
-                                                    ),
-                                                  )}
-                                                </ul>
-                                              )}
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-
-                                    <div className="grid grid-cols-1 gap-4">
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed">
-                                        <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">
-                                          Scope Context
-                                        </span>
-                                        {project.requirements.scope}
-                                      </div>
-
-                                      {Array.isArray(
-                                        project.requirements
-                                          .technicalConstraints,
-                                      ) && (
-                                        <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed">
-                                          <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">
-                                            Technical Constraints
-                                          </span>
-                                          <ul className="list-disc pl-4 space-y-1">
-                                            {project.requirements.technicalConstraints.map(
-                                              (tc: string, k: number) => (
-                                                <li key={k}>{tc}</li>
-                                              ),
-                                            )}
-                                          </ul>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Documentation generation in progress...
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </section>
-
-                          {/* DESIGN SPECIFICATION */}
-                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  design: !prev.design,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
-                                    ></path>
-                                  </svg>
-                                </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  System Design
-                                </h3>
-                              </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.design ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
-                              </div>
-                            </button>
-                            {expandedDocs.design && (
-                              <div className="mt-4">
-                                {project?.design ? (
-                                  <div className="space-y-6">
-                                    {project.design.designSystem && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter text-[11px]">
-                                          Visual Theme & Design System
-                                        </span>
-                                        <div className="text-[11px] text-slate-500 leading-relaxed italic">
-                                          {project.design.designSystem}
-                                        </div>
-                                      </div>
-                                    )}
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                        Wireframe Concepts
-                                      </h4>
-                                      <div className="text-xs text-slate-400 whitespace-pre-wrap leading-relaxed bg-slate-800/20 p-4 rounded-xl border border-slate-800/50 font-mono">
-                                        {project.design.wireframes}
-                                      </div>
-                                    </div>
-
-                                    {project.design.apiEndpoints && (
-                                      <div>
-                                        <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                          API Contracts
-                                        </h4>
-                                        <div className="space-y-2">
-                                          {(Array.isArray(
-                                            project.design.apiEndpoints,
-                                          )
-                                            ? project.design.apiEndpoints
-                                            : []
-                                          ).map((ep: string, k: number) => (
-                                            <div
-                                              key={k}
-                                              className="text-[10px] font-mono text-emerald-400 bg-emerald-950/30 px-3 py-2 rounded-lg border border-emerald-900/50 truncate"
-                                            >
-                                              {ep}
-                                            </div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Design blueprints pending...
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </section>
-
-                          {/* VERIFICATION REPORT */}
-                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  test: !prev.test,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-lg bg-emerald-600/20 text-emerald-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                                    ></path>
-                                  </svg>
-                                </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Verification Report
-                                </h3>
-                              </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.test ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
-                              </div>
-                            </button>
-                            {expandedDocs.test && (
-                              <div className="mt-4">
-                                {project?.tests ? (
-                                  <div className="space-y-6">
-                                    {project.tests.executiveSummary && (
-                                      <div className="p-4 bg-emerald-950/20 rounded-xl border border-emerald-900/30 mb-4">
-                                        <div className="text-[10px] font-bold text-emerald-500 uppercase mb-1">
-                                          Executive Summary
-                                        </div>
-                                        <div className="text-sm font-medium text-emerald-300">
-                                          {project.tests.executiveSummary}
-                                        </div>
-                                      </div>
-                                    )}
-
-                                    <div className="flex gap-4">
-                                      <div className="flex-1 bg-slate-800/50 p-3 rounded-xl">
-                                        <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">
-                                          Stability Score
-                                        </div>
-                                        <div className="text-sm font-bold text-slate-300">
-                                          98.2%
-                                        </div>
-                                      </div>
-                                      <div className="flex-1 bg-slate-800/50 p-3 rounded-xl">
-                                        <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">
-                                          Total Coverage
-                                        </div>
-                                        <div className="text-sm font-bold text-slate-300">
-                                          85%
-                                        </div>
-                                      </div>
-                                    </div>
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-mt-2">
-                                        Verification Pass Strategy
-                                      </h4>
-                                      <ul className="space-y-4">
-                                        {(Array.isArray(project.tests.testCases)
-                                          ? project.tests.testCases
-                                          : []
-                                        ).map((tc: any, i: number) => (
-                                          <li
-                                            key={i}
-                                            className="flex items-start gap-4 text-[13px] text-slate-400 bg-slate-800/20 p-4 rounded-2xl border border-slate-800/50"
-                                          >
-                                            <div
-                                              className={`w-5 h-5 rounded-full flex items-center justify-center mt-0.5 flex-shrink-0 ${tc.status === "passed" ? "bg-emerald-500/20 text-emerald-500" : "bg-rose-500/20 text-rose-500"}`}
-                                            >
-                                              {tc.status === "passed" ? (
-                                                <CheckCircle2 className="w-3 h-3" />
-                                              ) : (
-                                                <AlertCircle className="w-3 h-3" />
-                                              )}
-                                            </div>
-                                            <div className="flex-1">
-                                              <div className="flex items-center gap-3 mb-2">
-                                                <span className="font-mono font-bold text-slate-500 text-[10px]">
-                                                  ID: {tc.id || i + 1}
-                                                </span>
-                                                {tc.severity && (
-                                                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-widest ${tc.severity === 'Critical' ? 'bg-rose-500 text-white' : tc.severity === 'Major' ? 'bg-amber-500 text-white' : 'bg-slate-700 text-slate-400'}`}>
-                                                    {tc.severity}
-                                                  </span>
-                                                )}
-                                                <span className={`ml-auto text-[10px] font-bold uppercase ${tc.status === 'passed' ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                                  {tc.status}
-                                                </span>
-                                              </div>
-                                              <p className="font-medium text-slate-300 leading-relaxed mb-2">
-                                                {tc.description}
-                                              </p>
-                                              {tc.notes && (
-                                                <div className="p-3 bg-slate-950/50 rounded-xl text-[11px] text-slate-500 border border-slate-800/50">
-                                                  <strong>Observability Note:</strong> {tc.notes}
-                                                </div>
-                                              )}
-                                            </div>
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-
-                                    {project.tests.codeAudit && (
-                                      <div className="mt-4">
-                                        <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-2">
-                                          Code Quality Audit
-                                        </h4>
-                                        <div className="text-[11px] text-slate-400 p-3 bg-slate-950 rounded-xl border border-slate-800/50 whitespace-pre-wrap">
-                                          {project.tests.codeAudit}
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    QA cycle pending...
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </section>
-                        </div>
-
-                        <div className="space-y-8">
-                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8 h-fit">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  arch: !prev.arch,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                                    ></path>
-                                  </svg>
-                                </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Architectural Design
-                                </h3>
-                              </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.arch ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
-                              </div>
-                            </button>
-                            {expandedDocs.arch && (
-                              <div className="mt-4">
-                                {project?.design ? (
-                                  <div className="space-y-4">
-                                    {project.design.architectureDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-slate-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          Architecture (Mermaid)
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={
-                                            project.design.architectureDiagram
-                                          }
-                                        />
-                                      </div>
-                                    )}
-                                    <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 font-mono text-[10px] text-slate-500 leading-relaxed whitespace-pre-wrap italic">
-                                      {project.design.architecture ||
-                                        "Blueprint validated."}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Architect is mapping system entities...
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </section>
-                        </div>
-                      </div>
+                  {deliverableSubTab === "docs" && project && (
+                    <div className="flex-1 flex min-h-0">
+                      <ArtifactsDashboard project={project} />
                     </div>
                   )}
                 </div>

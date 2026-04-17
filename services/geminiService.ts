@@ -3,7 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
-const DEFAULT_MODEL = 'gemini-3-flash-preview'; // Upgraded to latest available tier
+const DEFAULT_MODEL = 'gemini-3.1-pro-preview'; // Updated to match API key available models
 
 export class GeminiService {
   private ai: GoogleGenAI;
@@ -88,11 +88,19 @@ export class GeminiService {
     Your goal is to produce a highly detailed, professional, and comprehensive Product Requirements Document (PRD).
 
     ### Guidelines:
-    1. **Comprehensive Depth**: Do not hold back on detail. Explore edge cases, user personas, and sophisticated business logic.
-    2. **Professional Structure**: Organize information logically. Use clear, descriptive language suitable for executive stakeholders and lead engineers.
-    3. **Actionable User Stories**: Provide detailed user stories with extensive acceptance criteria (functional, non-functional, and edge cases).
+    1. **Exhaustive Comprehensive Depth**: Do not hold back on detail. Outline a massive scope. Include robust features, dynamic sections, complex edge cases, user personas, and sophisticated business logic.
+    2. **MANDATORY Multi-Section Structure**: You MUST define a standard high-end website structure containing at least these 8 sections:
+       - **Navbar**: Top navigation with logo and links.
+       - **Hero**: Immersive entrance with value prop.
+       - **About**: Brand story and core values.
+       - **Services/Features**: Detailed breakdown of offerings.
+       - **Projects/Portfolio**: Showcasing work/case studies.
+       - **Testimonials**: Social proof and client trust.
+       - **Contact**: Advanced lead capture and location info.
+       - **Footer**: Navigation, legal, and social links.
+    3. **Actionable User Stories**: Provide extremely detailed user stories with granular acceptance criteria for EVERY mandatory section above.
     4. **Holistic View**: Include data entities, technical constraints, and a clear executive vision.
-    5. **High Value**: The documentation should feel like a high-priced consulting deliverable.
+    5. **High Value**: The documentation should feel like a high-priced engineering deliverable for a flagship enterprise product rollout.
 
     Output strictly as JSON.`;
 
@@ -151,26 +159,40 @@ export class GeminiService {
     
     ### Requirements:
     1. **Architectural Blueprints**: Provide a highly detailed Mermaid.js diagram illustrating the full system architecture, state management flow, and component communication.
-    2. **UX Strategy & Wireframes**: Extensive textual descriptions of the UI/UX journey, layout hierarchy, and micro-interaction specifications.
-    3. **API Ecosystem**: Formulate robust API contracts (methods, paths, request/response structures, error handling strategy).
-    4. **Modular Architecture**: Detailed map of React components, their hierarchical relationships, shared state patterns, and prop-drilling prevention strategies.
-    5. **Premium Design Language**: Apply the '${theme || 'Modern Obsidian'}' theme with extreme precision. 
+    2. **Component Hierarchy Diagram**: Provide a Mermaid.js graph (graph TD) showing the HLD — all major components, their nesting, and communication paths. Essential: Map out the 8 mandatory sections into a proper React component tree.
+    3. **ER Diagram**: Provide a Mermaid.js erDiagram showing all data entities, their attributes, and relationships based on the requirements' dataEntities.
+    4. **Sequence Diagram**: Provide a Mermaid.js sequenceDiagram illustrating the primary user flow through the application.
+    5. **UX Strategy & Exhaustive Wireframes**: Provide massive, extensive textual descriptions of the UI/UX journey. You MUST define wireframes for the 8 mandatory sections (Navbar, Hero, About, Services, Portfolio, Testimonials, Contact, Footer).
+    6. **API Ecosystem**: Formulate robust API contracts (methods, paths, request/response structures, error handling strategy).
+    7. **Modular Modular Architecture**: Define a clean, decoupled component architecture. Break the 8 sections into independent React components with clear prop interfaces.
+    8. **Premium Design Language**: Apply the '${theme || 'Modern Obsidian'}' theme with extreme precision. 
        - Define a sophisticated design tokens library (colors, spacing, shadows, typography).
        - **CRITICAL**: The design MUST be elite. Specify vibrant, harmonious color palettes, sophisticated typography (Inter/Outfit), sleek dark modes, glassmorphism effects, dynamic micro-animations, and fluid transitions. 
        - The documentation must describe a "State-of-the-art" visual experience.
+
+    ### CRITICAL MERMAID SYNTAX RULES (MUST FOLLOW):
+    - NEVER use parentheses in subgraph names → "subgraph Frontend" NOT "subgraph Frontend (React)"
+    - NEVER use slashes in node labels → "PostgreSQL or MongoDB" NOT "PostgreSQL/MongoDB"
+    - NEVER redefine a node ID with a different label
+    - Do NOT wrap diagrams in markdown code fences — output ONLY raw Mermaid syntax
+    - For erDiagram: use proper erDiagram syntax with entity names, attributes, and relationship lines
+    - For sequenceDiagram: use proper participant, arrows (->>, -->>), and notes
 
     Output strictly as JSON.`;
 
     const schema = {
       type: Type.OBJECT,
       properties: {
-        architectureDiagram: { type: Type.STRING, description: "Comprehensive Mermaid.js graph definition" },
+        architectureDiagram: { type: Type.STRING, description: "Comprehensive Mermaid.js graph TD definition showing full system architecture — components, services, databases, external APIs, and their connections. Raw Mermaid syntax only, no code fences." },
+        componentDiagram: { type: Type.STRING, description: "Mermaid.js graph TD showing HLD component hierarchy — all major UI components, their nesting within layout areas, and data flow between them. Raw Mermaid syntax only, no code fences." },
+        erDiagram: { type: Type.STRING, description: "Mermaid.js erDiagram showing all data entities derived from dataEntities in the requirements, with their attributes (types) and relationships (one-to-many, etc). Raw Mermaid syntax only, no code fences." },
+        sequenceDiagram: { type: Type.STRING, description: "Mermaid.js sequenceDiagram illustrating the primary user flow — from entry through key interactions to completion. Include participants, messages, and alt/opt blocks where relevant. Raw Mermaid syntax only, no code fences." },
         componentStructure: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Detailed component hierarchy and responsibility map" },
         wireframes: { type: Type.STRING, description: "Extensive UX layout descriptions and interaction specs" },
         apiEndpoints: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Formal API specifications including methods and data shapes" },
         designSystem: { type: Type.STRING, description: "Comprehensive design tokens, color palette, and visual principles" }
       },
-      required: ["architectureDiagram", "componentStructure", "wireframes", "apiEndpoints", "designSystem"]
+      required: ["architectureDiagram", "componentDiagram", "erDiagram", "sequenceDiagram", "componentStructure", "wireframes", "apiEndpoints", "designSystem"]
     };
 
     const prompt = `Requirements Artifact: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback for Refinement: ${feedback}` : ''}`;
@@ -186,34 +208,37 @@ export class GeminiService {
 
     ### CRITICAL RULES FOR MODIFICATION:
     1. **Targeted Edits**: Only modify the files necessary to address the user's feedback.
-    2. **Multi-File Output**: Return a JSON object where keys are file paths (e.g., "frontend/App.tsx", "backend/server.js") and values are the raw complete file contents. Include ALL files that were changed. Do NOT include files that were not changed.
-    3. **Frontend Constraint**: Any changes to the React frontend MUST remain within the single monolithic 'frontend/App.tsx' file. Do not create new frontend files.
+    2. **Multi-File Output**: Return a JSON object where keys are file paths (e.g., "src/App.jsx", "server/index.js") and values are the raw complete file contents.
+    3. **Monolithic Frontend**: ALL React frontend code MUST remain within the single monolithic 'src/App.jsx' file. Do not create new frontend component files. Define all sub-components within this file.
     4. **Design System**: Maintain the '${theme || 'Modern Obsidian'}' theme unless the feedback asks to change it.
 
     Output strictly as a valid JSON object. Do not wrap it in markdown block. Do not write anything else.`
       : `You are an elite 10x Full-Stack Engineer. Your task is to build a "Production-Ready", 100% complete application (Node.js backend + React frontend).
 
-    ### CORE MANDATE:
-    1. **Zero Placeholders**: Every feature, section, and component defined in the requirements and design MUST be fully implemented. "TODO" comments or empty sections are strictly forbidden.
-    2. **High Architectural Fidelity**: Synthesize code that is 100% accurate to the provided User Stories, accepted PRD, and Architectural Blueprints.
-    3. **Functional Completeness**: Implement real application logic (state management, event handlers, form validations, data transformations) so the site is "ready to ship".
+    ### CORE MANDATE (NO LAZINESS ALLOWED):
+    1. **Zero Placeholders & No Stubs**: Every single feature, section, and component defined in the requirements and design MUST be fully implemented. "TODO" comments, "..." or empty sections are STRICTLY FORBIDDEN. You must write out the FULL, exhaustive code.
+    2. **MANDATORY 8-SECTION WEBSITE**: You MUST build a massive, multi-section website containing: Navbar, Hero, About, Services, Portfolio, Testimonials, Contact, and Footer. All must be visually stunning.
+    3. **MONOLITHIC App.jsx**: You MUST put ALL React code (including sub-components like Navbar, Hero, etc.) into a single file: 'src/App.jsx'. Do NOT create 'src/components/' or other frontend folders.
+    4. **INTERNAL COMPONENTS**: Define sections as separate functions/components *within* 'src/App.jsx' above the main App component. This avoids import/ReferenceErrors.
+    5. **VALID LUCIDE ICONS**: ONLY use real icons from 'lucide-react' (e.g., Menu, X, ArrowRight).
+    6. **STRUCTURED DATA**: Define mock data as a local object 'MOCK_DATA' at the top of 'src/App.jsx' to ensure content richness.
+    7. **Defensive Programming**: Use optional chaining ('?.') everywhere.
 
-    ### CRITICAL ARCHITECTURE RULES:
     4. **Full-Stack JSON Map**: Generate both backend and frontend. Output a JSON object mapping file paths to string contents.
-    5. **Backend Structure**: Create a standard Node.js Express backend (e.g., "backend/server.js", "backend/routes/api.js", "backend/package.json").
-    6. **CRITICAL FRONTEND RULE**: The ENTIRE React frontend application MUST be written into a single monolithic file at "frontend/App.tsx". 
-       - Define all sub-components, hooks, and styles inside this file.
-       - Use a sophisticated SPA (Single Page App) architecture with internal state-based navigation or routing to handle all pages/views defined in the design.
-       - The 'export default function App()' must be at the very bottom.
-    7. **Modern Tech Stack**: Use 'lucide-react' for icons, 'framer-motion' for elite animations, 'tailwind-merge' and 'clsx' for styling.
+    5. **Backend Structure**: Create a standard Node.js Express backend in the 'server/' directory (e.g., "server/index.js", "server/package.json").
+    6. **FRONTEND STRUCTURE (MONOLITHIC)**:
+        - 'src/App.jsx': The ONLY frontend file. Put ALL code here.
+        - 'src/index.css': Global styles and Tailwind directives.
+    7. **Modern Tech Stack**: Use 'lucide-react', 'framer-motion', 'tailwind-merge', 'clsx'.
 
     ### PREMIUM UI/UX DIRECTIVES (MANDATORY):
-    8. **Visual Excellence**: Create a design that is visually stunning, futuristic, and premium. Use sophisticated typography, glassmorphism, advanced gradients, and micro-interactions.
-    9. **Interactive Fidelity**: Every button must have a hover state, every transition must be smooth, and every user action must provide feedback. The UI should feel "alive".
-    10. **Aesthetic Depth**: Use advanced CSS (backdrop-blur, layered shadows, subtle textures) to create a high-end SaaS aesthetic.
+    8. **Awwwards-Level Visual Excellence**: Use complex CSS grids (Bento layouts), overlapping elements, and rich micro-interactions.
+    9. **Rich Media & Imagery**: Integrate contextually relevant placeholder images from Unsplash.
+    10. **Aesthetic Depth**: Use backdrop-blurs, glassmorphism, decorative background orbs, and subtle textures.
+    11. **Motion & Interaction**: Implement complex \`framer-motion\` animations (staggered entries, scroll-fade). Every interaction must feel "premium".
 
     ### ABSOLUTE CONSTRAINTS:
-    11. **NEVER use import.meta.env or process.env in frontend code**. Hardcode the API base URL: \`const API_BASE = 'http://localhost:3001';\`.
+    11. **NEVER use import.meta.env or process.env in frontend code**. Hardcode API base: "const API_BASE = 'http://localhost:3001';".
     
     ### STRICT OUTPUT FORMAT:
     - Output strictly as a valid JSON object mapping file paths to their full string contents.
@@ -246,9 +271,10 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
       
       ACTION:
       Synthesize the absolute complete, high-performance Full-Stack code now. 
-      Every section, component, and interaction defined in the requirements and design MUST be present.
-      Ensure the generated website is the MOST ACCURATE representation of the original user vision (${prompt}).
-      Render every component with full logic. Ready for instant production-grade deployment.`;
+      Every section, functional component, state management logic, design layout, and interactive element defined in the requirements and design MUST be present. YOU MUST WRITE THOUSANDS OF LINES if required. 
+      DO NOT skip sections. DO NOT output partial code. DO NOT just make a header and footer.
+      Ensure the generated application is an EXHAUSTIVE, MASSIVE, MOST ACCURATE representation of the original user vision (${prompt}).
+      Render every component with full logic. Ready for instant production-grade deployment!`;
 
     const responseText = await this.generateWithRetry(
       actionPrompt,
@@ -407,21 +433,29 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
     // 1. Remove markdown code blocks if present (robustly)
     cleanText = cleanText.replace(/```[a-zA-Z]*\n/g, '').replace(/```/g, '').trim();
 
-    // 2. Extract strictly JSON object bounds
+    // 2. Extract strictly JSON bounds (Object or Array)
     const firstBrace = cleanText.indexOf('{');
+    const firstBracket = cleanText.indexOf('[');
     const lastBrace = cleanText.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      cleanText = cleanText.substring(firstBrace, lastBrace + 1);
-    } else if (firstBrace !== -1) {
-      cleanText = cleanText.substring(firstBrace);
+    const lastBracket = cleanText.lastIndexOf(']');
+
+    const start = (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) ? firstBrace : firstBracket;
+    const end = (lastBrace !== -1 && (lastBracket === -1 || lastBrace > lastBracket)) ? lastBrace : lastBracket;
+
+    if (start !== -1 && end !== -1 && end > start) {
+      cleanText = cleanText.substring(start, end + 1);
+    } else if (start !== -1) {
+      cleanText = cleanText.substring(start);
     }
 
     try {
       return this.unwrapFileMap(JSON.parse(cleanText));
     } catch (parseError: any) {
-      console.warn("JSON Parse Failure. Attempting repair...");
+      console.warn("JSON Parse Failure. Attempting aggressive repair...");
       try {
         let repairText = cleanText;
+        
+        // Handle unclosed quotes at the end
         let inString = false;
         let escaped = false;
         for (let i = 0; i < repairText.length; i++) {
@@ -430,8 +464,8 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
           escaped = (char === '\\' && !escaped);
         }
         if (inString) repairText += '"';
-        repairText = repairText.trim();
-        if (repairText.endsWith(',')) repairText = repairText.slice(0, -1);
+
+        // Balance brackets and braces
         const stack: string[] = [];
         let stringMode = false;
         let escapeMode = false;
@@ -448,10 +482,12 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
           }
         }
         while (stack.length > 0) repairText += stack.pop();
+        
         return this.unwrapFileMap(JSON.parse(repairText));
       } catch (repairError) {
-        if (!cleanText.startsWith('{') && (cleanText.includes('export') || cleanText.includes('import'))) {
-          return { "frontend/App.tsx": cleanText };
+        // Fallback: If it looks like raw code instead of JSON
+        if (!cleanText.startsWith('{') && !cleanText.startsWith('[') && (cleanText.includes('export') || cleanText.includes('import'))) {
+          return { "src/App.jsx": cleanText };
         }
         throw new Error(`AI generated an invalid or truncated response that could not be repaired: ${parseError.message}`);
       }
