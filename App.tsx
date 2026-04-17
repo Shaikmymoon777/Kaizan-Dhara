@@ -19,7 +19,7 @@ import { AgentMessage, SDLCProject } from "./types";
 import AgentCard from "./components/AgentCard";
 import ChatSidebar from "./components/ChatSidebar";
 import HistorySidebar from "./components/HistorySidebar";
-import SearchBar from "./components/SearchBar";
+
 import LivePreview from "./components/LivePreview";
 import HomePage from "./components/HomePage";
 import LoginScreen from "./components/LoginScreen";
@@ -36,14 +36,34 @@ mermaid.initialize({
   fontFamily: "monospace",
 });
 
+// Sanitize AI-generated Mermaid to fix common syntax issues
+const sanitizeMermaid = (chart: string): string => {
+  let clean = chart.trim();
+  // Strip markdown code fences like ```mermaid ... ```
+  clean = clean.replace(/^```(?:mermaid)?\s*/i, '').replace(/```\s*$/, '').trim();
+  // Fix subgraph names: remove parentheses and slashes
+  clean = clean.replace(/subgraph\s+(.+)/g, (_match: string, name: string) => {
+    return 'subgraph ' + name.replace(/[()]/g, '').replace(/\//g, '-').trim();
+  });
+  // Fix node labels: replace slashes with "or"
+  clean = clean.replace(/\[([^\]]*\/[^\]]*)\]/g, (_match: string, label: string) => {
+    return '[' + label.replace(/\//g, ' or ') + ']';
+  });
+  return clean;
+};
+
 // A small functional component to safely render Mermaid Markdown into SVGs
-const MermaidDiagram = ({ chart }: { chart: string }) => {
+const MermaidDiagram = ({ chart, title }: { chart: string; title?: string }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
 
   useEffect(() => {
     if (containerRef.current && chart) {
+      setRenderError(null);
+      const diagramId = `mermaid-${Math.random().toString(36).substring(7)}`;
+      const sanitized = sanitizeMermaid(chart);
       mermaid
-        .render(`mermaid-${Math.random().toString(36).substring(7)}`, chart)
+        .render(diagramId, sanitized)
         .then((result) => {
           if (containerRef.current) {
             containerRef.current.innerHTML = result.svg;
@@ -51,12 +71,22 @@ const MermaidDiagram = ({ chart }: { chart: string }) => {
         })
         .catch((e) => {
           console.error("Mermaid Render Error", e);
-          if (containerRef.current) {
-            containerRef.current.innerHTML = `<pre class="text-[10px] text-rose-400">Failed to render diagram: ${e.message}</pre>`;
-          }
+          setRenderError(e?.message || 'Unknown render error');
+          // Clean up error SVGs mermaid injects into the DOM
+          const errSvg = document.getElementById(diagramId);
+          if (errSvg) errSvg.remove();
         });
     }
   }, [chart]);
+
+  if (renderError) {
+    return (
+      <div className="p-3 rounded-xl bg-slate-950 border border-rose-900/30">
+        {title && <span className="block font-bold text-rose-400 mb-2 uppercase tracking-tighter text-[11px]">{title} — Render Error</span>}
+        <pre className="text-[10px] text-slate-500 leading-relaxed whitespace-pre-wrap overflow-x-auto">{chart}</pre>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -92,7 +122,7 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
-  const [selectedTheme, setSelectedTheme] = useState("Modern Obsidian");
+  const selectedTheme = "Modern Obsidian";
   const [attachments, setAttachments] = useState<any[]>([]);
   const [isPreviewFullScreen, setIsPreviewFullScreen] = useState(false);
   const [isDeployModalOpen, setIsDeployModalOpen] = useState(false);
@@ -858,8 +888,7 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Center: Search Bar */}
-        <SearchBar onAttach={() => fileInputRef.current?.click()} />
+
 
         <div className="flex items-center gap-4">
           <div className="flex gap-2 bg-slate-900 p-1 rounded-xl border border-slate-800">
@@ -1012,23 +1041,7 @@ const App: React.FC = () => {
                 </button>
               </div>
 
-              {/* Theme Selector */}
-              <div className="mt-4">
-                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block mb-2">
-                  Visual Theme
-                </label>
-                <select
-                  value={selectedTheme}
-                  onChange={(e) => setSelectedTheme(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-700/50 rounded-xl px-4 py-3 text-xs text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all font-bold tracking-wider"
-                >
-                  <option>Modern Obsidian</option>
-                  <option>Ocean Breeze</option>
-                  <option>Cyberpunk Neon</option>
-                  <option>Minimalist White</option>
-                  <option>Forest Echo</option>
-                </select>
-              </div>
+
 
               {/* Attachments Display */}
               {attachments.length > 0 && (
@@ -2220,12 +2233,55 @@ const App: React.FC = () => {
                                     {project.design.architectureDiagram && (
                                       <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
                                         <span className="block font-bold text-slate-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          Architecture (Mermaid)
+                                          System Architecture
                                         </span>
                                         <MermaidDiagram
-                                          chart={
-                                            project.design.architectureDiagram
-                                          }
+                                          chart={project.design.architectureDiagram}
+                                          title="System Architecture"
+                                        />
+                                      </div>
+                                    )}
+                                    {project.design.componentDiagram && (
+                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
+                                        <span className="block font-bold text-cyan-400 mb-3 uppercase tracking-tighter text-[11px]">
+                                          HLD — Component Hierarchy
+                                        </span>
+                                        <MermaidDiagram
+                                          chart={project.design.componentDiagram}
+                                          title="Component Hierarchy"
+                                        />
+                                      </div>
+                                    )}
+                                    {project.design.erDiagram && (
+                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
+                                        <span className="block font-bold text-emerald-400 mb-3 uppercase tracking-tighter text-[11px]">
+                                          ER Diagram — Data Entities
+                                        </span>
+                                        <MermaidDiagram
+                                          chart={project.design.erDiagram}
+                                          title="ER Diagram"
+                                        />
+                                      </div>
+                                    )}
+                                    {project.design.sequenceDiagram && (
+                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
+                                        <span className="block font-bold text-amber-400 mb-3 uppercase tracking-tighter text-[11px]">
+                                          Sequence Diagram — User Flow
+                                        </span>
+                                        <MermaidDiagram
+                                          chart={project.design.sequenceDiagram}
+                                          title="Sequence Diagram"
+                                        />
+                                      </div>
+                                    )}
+                                    {project.design.lldDiagram && (
+                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
+                                        <span className="block font-bold text-rose-400 mb-3 uppercase tracking-tighter text-[11px]">
+                                          LLD — Low Level Design
+                                        </span>
+                                        <MermaidDiagram
+                                          chart={project.design.lldDiagram}
+                                          title="Low Level Design"
                                         />
                                       </div>
                                     )}

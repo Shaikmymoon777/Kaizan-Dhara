@@ -174,7 +174,9 @@ const LivePreview: React.FC<LivePreviewProps> = ({ code }) => {
           "recharts": "https://esm.sh/recharts@2.15.0?external=react",
           "date-fns": "https://esm.sh/date-fns@4.1.0",
           "react-router-dom": "https://esm.sh/react-router-dom@6.28.0?external=react",
-          "axios": "https://esm.sh/axios@1.7.9?external=react"
+          "axios": "https://esm.sh/axios@1.7.9?external=react",
+          "zustand": "https://esm.sh/zustand@4.5.2?external=react",
+          "zustand/middleware": "https://esm.sh/zustand@4.5.2/middleware?external=react"
         }
       }
     </script>

@@ -35,6 +35,10 @@ export interface SDLCProject {
   };
   design?: {
     architectureDiagram: string;
+    componentDiagram?: string;
+    erDiagram?: string;
+    sequenceDiagram?: string;
+    lldDiagram?: string;
     componentStructure: string[];
     wireframes: string;
     apiEndpoints: string[];

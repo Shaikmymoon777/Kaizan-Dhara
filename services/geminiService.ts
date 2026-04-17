@@ -3,7 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
-const DEFAULT_MODEL = 'gemini-3-flash-preview'; // Upgraded to latest available tier
+const DEFAULT_MODEL = 'gemini-3.1-pro-preview'; // Updated to match API key available models
 
 export class GeminiService {
   private ai: GoogleGenAI;
@@ -88,11 +88,11 @@ export class GeminiService {
     Your goal is to produce a highly detailed, professional, and comprehensive Product Requirements Document (PRD).
 
     ### Guidelines:
-    1. **Comprehensive Depth**: Do not hold back on detail. Explore edge cases, user personas, and sophisticated business logic.
-    2. **Professional Structure**: Organize information logically. Use clear, descriptive language suitable for executive stakeholders and lead engineers.
-    3. **Actionable User Stories**: Provide detailed user stories with extensive acceptance criteria (functional, non-functional, and edge cases).
+    1. **Exhaustive Comprehensive Depth**: Do not hold back on detail. Outline a massive scope. Include robust features, dynamic sections, complex edge cases, user personas, and sophisticated business logic.
+    2. **Multi-Page/Multi-Section Requirements**: Explicitly define multiple distinct visual and functional areas of the application (e.g., Immersive Hero, Interactive Features Grid, Complex Data Dashboards, Forms, Pricing Tables). You must define at least 8-10 major interactive user stories.
+    3. **Actionable User Stories**: Provide extremely detailed user stories with granular acceptance criteria (functional, non-functional, and interactive UI states).
     4. **Holistic View**: Include data entities, technical constraints, and a clear executive vision.
-    5. **High Value**: The documentation should feel like a high-priced consulting deliverable.
+    5. **High Value**: The documentation should feel like a high-priced engineering deliverable for a flagship enterprise product rollout.
 
     Output strictly as JSON.`;
 
@@ -151,30 +151,47 @@ export class GeminiService {
     
     ### Requirements:
     1. **Architectural Blueprints**: Provide a highly detailed Mermaid.js diagram illustrating the full system architecture, state management flow, and component communication.
-    2. **UX Strategy & Wireframes**: Extensive textual descriptions of the UI/UX journey, layout hierarchy, and micro-interaction specifications.
-    3. **API Ecosystem**: Formulate robust API contracts (methods, paths, request/response structures, error handling strategy).
-    4. **Modular Architecture**: Detailed map of React components, their hierarchical relationships, shared state patterns, and prop-drilling prevention strategies.
-    5. **Premium Design Language**: Apply the '${theme || 'Modern Obsidian'}' theme with extreme precision. 
+    2. **Component Hierarchy Diagram**: Provide a Mermaid.js graph (graph TD) showing the HLD — all major components, their nesting, and communication paths.
+    3. **ER Diagram**: Provide a Mermaid.js erDiagram showing all data entities, their attributes, and relationships based on the requirements' dataEntities.
+    4. **Sequence Diagram**: Provide a Mermaid.js sequenceDiagram illustrating the primary user flow through the application.
+    5. **Low Level Design (LLD) Diagram**: Provide a Mermaid.js classDiagram showing the internal low-level design — all classes, modules, services, and utility layers with their properties, methods, visibility modifiers, and inheritance or dependency relationships. This should cover frontend components (with props and state), backend services (with method signatures), data access layers, and helper utilities.
+    6. **UX Strategy & Exhaustive Wireframes**: Provide massive, extensive textual descriptions of the UI/UX journey. You MUST define wireframes for MULTIPLE distinct sections (Landing page, Content grids, Data dashboards, Modals, Footers). Do not skimp on details. 
+    7. **API Ecosystem**: Formulate robust API contracts (methods, paths, request/response structures, error handling strategy).
+    8. **Modular Architecture**: Detailed map of React components (you should define at least 10-15 distinct sub-components to ensure a robust build).
+    9. **Premium Design Language**: Apply the '${theme || 'Modern Obsidian'}' theme with extreme precision. 
        - Define a sophisticated design tokens library (colors, spacing, shadows, typography).
        - **CRITICAL**: The design MUST be elite. Specify vibrant, harmonious color palettes, sophisticated typography (Inter/Outfit), sleek dark modes, glassmorphism effects, dynamic micro-animations, and fluid transitions. 
        - The documentation must describe a "State-of-the-art" visual experience.
+
+    ### CRITICAL MERMAID SYNTAX RULES (MUST FOLLOW):
+    - NEVER use parentheses in subgraph names → "subgraph Frontend" NOT "subgraph Frontend (React)"
+    - NEVER use slashes in node labels → "PostgreSQL or MongoDB" NOT "PostgreSQL/MongoDB"
+    - NEVER redefine a node ID with a different label
+    - Do NOT wrap diagrams in markdown code fences — output ONLY raw Mermaid syntax
+    - For erDiagram: use proper erDiagram syntax with entity names, attributes, and relationship lines
+    - For sequenceDiagram: use proper participant, arrows (->>, -->>), and notes
+    - For classDiagram (LLD): use proper classDiagram syntax with class definitions, attributes with types and visibility (+, -, #), methods with parameters and return types, and relationship arrows (<|-- for inheritance, *-- for composition, o-- for aggregation, --> for dependency)
 
     Output strictly as JSON.`;
 
     const schema = {
       type: Type.OBJECT,
       properties: {
-        architectureDiagram: { type: Type.STRING, description: "Comprehensive Mermaid.js graph definition" },
+        architectureDiagram: { type: Type.STRING, description: "Comprehensive Mermaid.js graph TD definition showing full system architecture — components, services, databases, external APIs, and their connections. Raw Mermaid syntax only, no code fences." },
+        componentDiagram: { type: Type.STRING, description: "Mermaid.js graph TD showing HLD component hierarchy — all major UI components, their nesting within layout areas, and data flow between them. Raw Mermaid syntax only, no code fences." },
+        erDiagram: { type: Type.STRING, description: "Mermaid.js erDiagram showing all data entities derived from dataEntities in the requirements, with their attributes (types) and relationships (one-to-many, etc). Raw Mermaid syntax only, no code fences." },
+        sequenceDiagram: { type: Type.STRING, description: "Mermaid.js sequenceDiagram illustrating the primary user flow — from entry through key interactions to completion. Include participants, messages, and alt/opt blocks where relevant. Raw Mermaid syntax only, no code fences." },
+        lldDiagram: { type: Type.STRING, description: "Mermaid.js classDiagram showing the Low Level Design — all classes, modules, services, and utilities with their properties (with types), methods (with parameters and return types), visibility modifiers (+, -, #), and relationships (inheritance, composition, dependency). Cover frontend components, backend services, data access layers, and helpers. Raw Mermaid syntax only, no code fences." },
         componentStructure: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Detailed component hierarchy and responsibility map" },
         wireframes: { type: Type.STRING, description: "Extensive UX layout descriptions and interaction specs" },
         apiEndpoints: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Formal API specifications including methods and data shapes" },
         designSystem: { type: Type.STRING, description: "Comprehensive design tokens, color palette, and visual principles" }
       },
-      required: ["architectureDiagram", "componentStructure", "wireframes", "apiEndpoints", "designSystem"]
+      required: ["architectureDiagram", "componentDiagram", "erDiagram", "sequenceDiagram", "lldDiagram", "componentStructure", "wireframes", "apiEndpoints", "designSystem"]
     };
 
     const prompt = `Requirements Artifact: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback for Refinement: ${feedback}` : ''}`;
-    const res = await this.generateWithRetry(prompt, sys, schema, DEFAULT_MODEL, 5, 12288);
+    const res = await this.generateWithRetry(prompt, sys, schema, DEFAULT_MODEL, 5, 20480);
     return this.cleanAndParseJson(res || '{}');
   }
 
@@ -193,10 +210,12 @@ export class GeminiService {
     Output strictly as a valid JSON object. Do not wrap it in markdown block. Do not write anything else.`
       : `You are an elite 10x Full-Stack Engineer. Your task is to build a "Production-Ready", 100% complete application (Node.js backend + React frontend).
 
-    ### CORE MANDATE:
-    1. **Zero Placeholders**: Every feature, section, and component defined in the requirements and design MUST be fully implemented. "TODO" comments or empty sections are strictly forbidden.
-    2. **High Architectural Fidelity**: Synthesize code that is 100% accurate to the provided User Stories, accepted PRD, and Architectural Blueprints.
-    3. **Functional Completeness**: Implement real application logic (state management, event handlers, form validations, data transformations) so the site is "ready to ship".
+    ### CORE MANDATE (NO LAZINESS ALLOWED):
+    1. **Zero Placeholders & No Stubs**: Every single feature, section, and component defined in the requirements and design MUST be fully implemented. "TODO" comments, "..." or empty sections are STRICTLY FORBIDDEN. You must write out the FULL, exhaustive code.
+    2. **Comprehensive Scope**: You MUST build a massive, multi-section, highly detailed website. Do NOT just output a shallow header, footer, and a simple dummy middle area. A proper site has immersive Hero sections, Feature grids, interactive dashboards, detailed data flows, forms, modals, or whatever is specified. Build them ALL. If you generate less than 800 lines of functional frontend code for a complex app, you have failed your mandate!
+    3. **High Architectural Fidelity**: Synthesize code that is 100% accurate to the provided User Stories, accepted PRD, and Architectural Blueprints.
+    4. **Functional Completeness**: Implement real application logic (state management with Zustand, event handlers, form validations, robust data transformations) so the site actually works and feels "ready to ship".
+    5. **Defensive Programming (CRITICAL)**: You MUST aggressively use optional chaining (\`?.map()\`) and fallback values (\`|| []\`) when mapping over arrays or accessing nested object properties. Data may be undefined on initial render. Never assume an array exists before mapping over it.
 
     ### CRITICAL ARCHITECTURE RULES:
     4. **Full-Stack JSON Map**: Generate both backend and frontend. Output a JSON object mapping file paths to string contents.
@@ -208,9 +227,10 @@ export class GeminiService {
     7. **Modern Tech Stack**: Use 'lucide-react' for icons, 'framer-motion' for elite animations, 'tailwind-merge' and 'clsx' for styling.
 
     ### PREMIUM UI/UX DIRECTIVES (MANDATORY):
-    8. **Visual Excellence**: Create a design that is visually stunning, futuristic, and premium. Use sophisticated typography, glassmorphism, advanced gradients, and micro-interactions.
-    9. **Interactive Fidelity**: Every button must have a hover state, every transition must be smooth, and every user action must provide feedback. The UI should feel "alive".
-    10. **Aesthetic Depth**: Use advanced CSS (backdrop-blur, layered shadows, subtle textures) to create a high-end SaaS aesthetic.
+    8. **Awwwards-Level Visual Excellence**: The design MUST be visually stunning, highly modern, and absolutely premium. Avoid boring, basic, flat centered layouts. Use complex CSS grids (e.g., asymmetrical Bento box layouts), overlapping elements, sophisticated typography scales, and rich micro-interactions.
+    9. **Rich Media & Imagery**: NEVER use solid colored placeholder boxes. You MUST integrate gorgeous placeholder images utilizing \`https://images.unsplash.com/photo-[ID]?auto=format&fit=crop&q=80\` to make the UI look realistic, immersive, and premium.
+    10. **Aesthetic Depth**: Heavily use advanced CSS properties (dense backdrop-blurs, glassmorphism layers, glowing decorative background orbs, deep layered shadows, subtle dot/grid textures, moving background gradients).
+    11. **Motion & Interaction**: Implement complex \`framer-motion\` animations (staggered list reveals, scroll-linked fade-ups, layout transitions, hover/tap button scales). Every interaction must feel "alive".
 
     ### ABSOLUTE CONSTRAINTS:
     11. **NEVER use import.meta.env or process.env in frontend code**. Hardcode the API base URL: \`const API_BASE = 'http://localhost:3001';\`.
@@ -246,9 +266,10 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
       
       ACTION:
       Synthesize the absolute complete, high-performance Full-Stack code now. 
-      Every section, component, and interaction defined in the requirements and design MUST be present.
-      Ensure the generated website is the MOST ACCURATE representation of the original user vision (${prompt}).
-      Render every component with full logic. Ready for instant production-grade deployment.`;
+      Every section, functional component, state management logic, design layout, and interactive element defined in the requirements and design MUST be present. YOU MUST WRITE THOUSANDS OF LINES if required. 
+      DO NOT skip sections. DO NOT output partial code. DO NOT just make a header and footer.
+      Ensure the generated application is an EXHAUSTIVE, MASSIVE, MOST ACCURATE representation of the original user vision (${prompt}).
+      Render every component with full logic. Ready for instant production-grade deployment!`;
 
     const responseText = await this.generateWithRetry(
       actionPrompt,
