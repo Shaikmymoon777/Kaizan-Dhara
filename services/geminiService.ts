@@ -196,7 +196,7 @@ export class GeminiService {
     };
 
     const prompt = `Requirements Artifact: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback for Refinement: ${feedback}` : ''}`;
-    const res = await this.generateWithRetry(prompt, sys, schema, DEFAULT_MODEL, 5, 12288);
+    const res = await this.generateWithRetry(prompt, sys, schema, DEFAULT_MODEL, 5, 20480);
     return this.cleanAndParseJson(res || '{}');
   }
 
