@@ -76,7 +76,7 @@ export class LocalLLMService {
     }
   }
 
-  async runRequirementAgent(prompt: string, attachments?: any[]) {
+  async runRequirementAgent(prompt: string, attachments?: any[], brdData?: any, figmaData?: any) {
     const sys = `You are a Senior Lead Business Analyst and Product Architect. Produce a detailed, comprehensive PRD.
     
     ### Guidelines:
@@ -103,7 +103,7 @@ export class LocalLLMService {
     }
   }
 
-  async runDesignAgent(requirements: any, theme?: string, feedback?: string) {
+  async runDesignAgent(requirements: any, theme?: string, feedback?: string, figmaData?: any) {
     const sys = `You are a Principal Software Architect and Lead UI/UX Strategist.
     Translate requirements into a sophisticated, detailed technical design blueprint.
     ### Requirements:
@@ -130,7 +130,7 @@ export class LocalLLMService {
     }
   }
 
-  async runDevelopmentAgent(design: any, requirements: any, prompt: string, theme?: string, feedback?: string) {
+  async runDevelopmentAgent(design: any, requirements: any, prompt: string, theme?: string, feedback?: string, existingCode?: string | Record<string, string>, figmaData?: any) {
     const sys = `You are an elite 10x Full-Stack Engineer. Build a "Production-Ready", 100% complete React application.
     ### CORE MANDATE:
     1. **Zero Placeholders**: Every feature in the design MUST be fully realized. No "TODO"s.
@@ -149,6 +149,28 @@ export class LocalLLMService {
     const response = await this.generate(context, sys);
 
     return response;
+  }
+
+  async runDevDocsAgent(code: string | Record<string, string>, requirements: any, design: any) {
+    const sys = `You are a Technical Writer. Generate development documentation for the project. Output JSON with techStack, projectStructure, setupInstructions, keyComponentsDescription, apiIntegrationDetails, environmentVariables, and deploymentOverview.`;
+    const codeContent = typeof code === 'string' ? code : JSON.stringify(code, null, 2);
+    const context = `Code: ${codeContent.substring(0, 5000)}\n\nRequirements: ${JSON.stringify(requirements)}\n\nDesign: ${JSON.stringify(design)}`;
+    const response = await this.generate(context, sys);
+
+    try {
+      return JSON.parse(response);
+    } catch (e) {
+      console.error('Failed to parse dev docs response:', e);
+      return {
+        techStack: 'N/A',
+        projectStructure: 'N/A',
+        setupInstructions: 'N/A',
+        keyComponentsDescription: 'N/A',
+        apiIntegrationDetails: 'N/A',
+        environmentVariables: 'N/A',
+        deploymentOverview: 'N/A'
+      };
+    }
   }
 
   async runTestingAgent(code: string | Record<string, string>, requirements: any, prompt: string, feedback?: string) {

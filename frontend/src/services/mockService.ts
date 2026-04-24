@@ -63,21 +63,32 @@ export class MockLLMService {
   async runDesignAgent(requirements: any, theme?: string) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     return {
-      architecture: `# System Architecture
-- **Frontend Framework**: React 18
-- **Styling Engine**: Tailwind CSS
-- **State Management**: React Hooks (useState, useEffect)
-- **Icons**: Lucide React
-- **Animations**: Framer Motion
-- **Component Structure**: Atomic Design principles`,
-      wireframes: `## Layout Structure
-1. **Navigation Bar**: Sticky header with logo and links
-2. **Hero Section**: Large typography, ambient background, primary CTA
-3. **Feature Grid**: Bento-box style layout for key features
-4. **Content Area**: Dynamic sections based on usage
-5. **Footer**: Clean layout with social links and copyright`,
-      apiContracts: `No external backend required for this frontend-only implementation. 
-State is managed locally for demonstration purposes.`
+      hld: {
+        systemArchitectureOverview: "Modern microservices-inspired frontend architecture with atomic design principles.",
+        architectureDiagram: "graph TD\n  A[User] --> B[App Shell]\n  B --> C[Navigation]\n  B --> D[Main Content]\n  D --> E[Feature Modules]",
+        componentDiagram: "classDiagram\n  class App\n  class Layout\n  App --> Layout",
+        dataFlowDescription: "Uni-directional data flow using React state and props.",
+        externalIntegrations: ["Lucide Icons", "Framer Motion"],
+        technologyStackOverview: "React 18, Tailwind CSS, TypeScript"
+      },
+      lld: {
+        detailedComponentDesign: "Functional components with hooks for state management.",
+        apiEndpoints: [
+          { method: "GET", endpoint: "/api/v1/products", request: "{}", response: "{ products: [] }" },
+          { method: "POST", endpoint: "/api/v1/cart", request: "{ id: string }", response: "{ success: boolean }" }
+        ],
+        dataModels: "Product { id: string, name: string, price: number }\nCart { items: Product[] }",
+        uiComponentStructure: "Atomic design: Atoms, Molecules, Organisms",
+        sequenceFlows: "sequenceDiagram\n  User ->> UI: Click Add to Cart\n  UI ->> State: Update Cart\n  State -->> UI: Render Updated Cart",
+        classDiagram: "classDiagram\n  class ProductService {\n    +getProducts()\n  }"
+      },
+      databaseDesign: {
+        erDiagram: "erDiagram\n  PRODUCT ||--o{ CART_ITEM : contains\n  USER ||--o{ CART : has",
+        tables: [
+          { name: "Products", fields: "id (UUID), name (String), price (Decimal)", relationships: "1:N with CartItems" },
+          { name: "Users", fields: "id (UUID), email (String)", relationships: "1:1 with Cart" }
+        ]
+      }
     };
   }
 

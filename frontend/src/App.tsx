@@ -11,11 +11,13 @@ import {
   Box,
   FileText,
   FileDigit,
+  Download,
 } from "lucide-react";
 import { GeminiService } from "./services/geminiService";
 import { LocalLLMService } from "./services/localLLMService";
 
-import { AgentMessage, SDLCProject } from "./types";
+import { type AgentMessage, SDLCProject } from "./types";
+import { FigmaService, type FigmaSchema } from "./services/figmaService";
 import AgentCard from "./components/AgentCard";
 import ChatSidebar from "./components/ChatSidebar";
 import HistorySidebar from "./components/HistorySidebar";
@@ -30,6 +32,7 @@ import ToastNotification, { useToasts, type Toast } from "./components/ToastNoti
 
 import { storage } from "./utils/storage";
 import mermaid from "mermaid";
+import { parseDocument, mergeDocuments, type BRDStructuredData } from "./services/brdParserService";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_CONTEXT_LENGTH = 8000;
@@ -151,19 +154,84 @@ mermaid.initialize({
   fontFamily: "monospace",
 });
 
-// Sanitize AI-generated Mermaid to fix common syntax issues
+// Sanitize AI-generated Mermaid to fix common syntax issues that cause render failures
 const sanitizeMermaid = (chart: string): string => {
+  if (!chart || !chart.trim()) return '';
   let clean = chart.trim();
-  // Strip markdown code fences like ```mermaid ... ```
-  clean = clean.replace(/^```(?:mermaid)?\s*/i, '').replace(/```\s*$/, '').trim();
-  // Fix subgraph names: remove parentheses and slashes
+
+  // 1. Strip markdown code fences: ```mermaid ... ``` or ```
+  clean = clean.replace(/^```(?:mermaid|graph|sequenceDiagram|erDiagram|classDiagram)?\s*/i, '').replace(/```\s*$/, '').trim();
+
+  // 2. Fix HTML entities that AI sometimes outputs
+  clean = clean.replace(/&amp;/g, 'and');
+  clean = clean.replace(/&lt;/g, '<');
+  clean = clean.replace(/&gt;/g, '>');
+  clean = clean.replace(/&quot;/g, '"');
+  clean = clean.replace(/&#39;/g, "'");
+
+  // 3. Fix subgraph names: remove parentheses, slashes, colons, and special chars
   clean = clean.replace(/subgraph\s+(.+)/g, (_match: string, name: string) => {
-    return 'subgraph ' + name.replace(/[()]/g, '').replace(/\//g, '-').trim();
+    return 'subgraph ' + name
+      .replace(/[()[\]{}]/g, '')
+      .replace(/\//g, '-')
+      .replace(/:/g, ' -')
+      .replace(/&/g, 'and')
+      .trim();
   });
-  // Fix node labels: replace slashes with "or"
-  clean = clean.replace(/\[([^\]]*\/[^\]]*)\]/g, (_match: string, label: string) => {
-    return '[' + label.replace(/\//g, ' or ') + ']';
+
+  // 4. Fix node labels in square brackets: replace slashes, ampersands, and problematic chars
+  clean = clean.replace(/\[([^\]]*)\]/g, (_match: string, label: string) => {
+    return '[' + label
+      .replace(/\//g, ' or ')
+      .replace(/&/g, 'and')
+      .replace(/[<>]/g, '')
+      + ']';
   });
+
+  // 5. Fix node labels in round brackets
+  clean = clean.replace(/\(([^)]*)\)/g, (_match: string, label: string) => {
+    return '(' + label
+      .replace(/\//g, ' or ')
+      .replace(/&/g, 'and')
+      + ')';
+  });
+
+  // 6. Remove lines with only whitespace or semicolons (can break Mermaid parsing)
+  clean = clean.split('\n')
+    .filter(line => line.trim() !== '' && line.trim() !== ';')
+    .join('\n');
+
+  // 7. Fix double arrows that some LLMs produce: --> --> becomes -->
+  clean = clean.replace(/-->\s*-->/g, '-->');
+  clean = clean.replace(/=+=>\s*==>/g, '==>');
+
+  // 8. Fix common erDiagram issues: Remove invalid attribute types with spaces/special chars
+  if (clean.includes('erDiagram')) {
+    clean = clean.replace(/\b(string|int|varchar|boolean|date|datetime|text|float|decimal|bigint|uuid)\b\s*\([^)]*\)/gi, '$1');
+  }
+
+  // 9. Fix classDiagram issues: Remove generic type parameters that break rendering
+  if (clean.includes('classDiagram')) {
+    clean = clean.replace(/<[^>]*>/g, '');
+  }
+
+  // 10. Ensure diagram has a valid type prefix — if missing, default to graph TD
+  const firstLine = clean.split('\n')[0].trim().toLowerCase();
+  const validPrefixes = ['graph', 'flowchart', 'sequencediagram', 'classdiagram', 'erdiagram', 'statediagram', 'gantt', 'pie', 'gitgraph', 'mindmap', 'timeline'];
+  const hasPrefix = validPrefixes.some(p => firstLine.startsWith(p));
+  if (!hasPrefix) {
+    // Check if it looks like a specific diagram type by content
+    if (clean.includes('participant') || clean.includes('->>')) {
+      clean = 'sequenceDiagram\n' + clean;
+    } else if (clean.includes('class ') && (clean.includes('{') || clean.includes('<|--'))) {
+      clean = 'classDiagram\n' + clean;
+    } else if (clean.includes('||--') || clean.includes('}|--') || clean.includes('}o--')) {
+      clean = 'erDiagram\n' + clean;
+    } else {
+      clean = 'graph TD\n' + clean;
+    }
+  }
+
   return clean;
 };
 
@@ -177,6 +245,12 @@ const MermaidDiagram = ({ chart, title }: { chart: string; title?: string }) => 
       setRenderError(null);
       const diagramId = `mermaid-${Math.random().toString(36).substring(7)}`;
       const sanitized = sanitizeMermaid(chart);
+      
+      if (!sanitized) {
+        setRenderError("Diagram data is empty after sanitization.");
+        return;
+      }
+
       mermaid
         .render(diagramId, sanitized)
         .then((result) => {
@@ -227,8 +301,11 @@ const App: React.FC = () => {
   const [expandedDocs, setExpandedDocs] = useState({
     req: true,
     design: true,
+    devdocs: true,
     test: true,
     arch: true,
+    dbSchema: true,
+    apiDocs: true,
   });
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -247,7 +324,13 @@ const App: React.FC = () => {
   const [selectedTestCase, setSelectedTestCase] = useState<string | null>(null);
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [figmaLink, setFigmaLink] = useState("");
+  const [figmaData, setFigmaData] = useState<FigmaSchema | null>(null);
+  const [isFetchingFigma, setIsFetchingFigma] = useState(false);
   const { toasts, addToast, removeToast } = useToasts();
+
+  // BRD parsing state
+  const [brdData, setBrdData] = useState<BRDStructuredData | null>(null);
+  const [showBRDPreview, setShowBRDPreview] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -343,6 +426,57 @@ const App: React.FC = () => {
     scrollToBottom();
   }, [messages]);
 
+  // Parse BRD/LLD/HLD documents whenever the file list changes
+  useEffect(() => {
+    const docFiles = processedFiles.filter(
+      f => f.status === 'done' && f.category === 'document' && f.content.trim().length > 0
+    );
+
+    if (docFiles.length === 0) {
+      setBrdData(null);
+      return;
+    }
+
+    const parsed = docFiles.map(f => parseDocument(f.content, f.name));
+    const merged = parsed.length > 1 ? mergeDocuments(parsed) : parsed[0];
+    setBrdData(merged);
+
+    if (merged.isValid) {
+      addToast({
+        type: 'info',
+        title: `${merged.documentType} Document Parsed`,
+        message: `Extracted ${merged.functional_requirements.length} functional requirements, ${merged.user_flows.length} user flows from "${docFiles.map(f => f.name).join(', ')}".`,
+        duration: 6000,
+      });
+    }
+  }, [processedFiles]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleFetchFigma = async () => {
+    if (!figmaLink) return;
+    setIsFetchingFigma(true);
+    try {
+      addMessage("Orchestrator", `Connecting to Figma API to extract design tokens and hierarchy for "${figmaLink}"...`, "thinking");
+      const data = await FigmaService.fetchFile(figmaLink);
+      setFigmaData(data);
+      addMessage("Orchestrator", `Successfully extracted ${data.pages.length} pages and design theme from Figma: "${data.name}"`);
+      addToast({
+        type: 'info',
+        title: 'Figma Design Linked',
+        message: `Extracted ${data.pages.length} pages and design tokens.`,
+        duration: 5000,
+      });
+    } catch (err: any) {
+      addMessage("Orchestrator", `Figma Error: ${err.message}`, "error");
+      addToast({
+        type: 'error',
+        title: 'Figma Error',
+        message: err.message,
+      });
+    } finally {
+      setIsFetchingFigma(false);
+    }
+  };
+
   // Helper function to add delays between API calls
   const delay = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
@@ -361,6 +495,8 @@ const App: React.FC = () => {
     setProcessedFiles([]);
     setSelectedTestCase(null);
     setFigmaLink("");
+    setBrdData(null);
+    setShowBRDPreview(false);
     setDeliverableSubTab("preview");
     setActiveTab("flow");
   };
@@ -451,72 +587,122 @@ const App: React.FC = () => {
         </head><body>
       `;
 
-      let body = `<h1>${project.requirements?.projectTitle || project.name}</h1>`;
+      let body = `<h1>${project.name}</h1>`;
       body += `<p><strong>Vision:</strong> Orchestrated Architecture & Product Strategy</p>`;
 
       if (project.requirements) {
-        body += `<h2>1. Requirement Specification (PRD)</h2>`;
-        body += `<div class="executive-summary"><strong>Executive Vision:</strong><br/>${project.requirements.executiveSummary || ""}</div>`;
+        const r = project.requirements as any;
+        body += `<h2>1. Requirement Specification (BRD)</h2>`;
+        if (r.projectOverview) body += `<div class="executive-summary"><strong>Project Overview:</strong><br/>${r.projectOverview}</div>`;
+        if (r.businessObjectives) body += `<h3>Business Objectives</h3><p>${r.businessObjectives}</p>`;
         
-        body += `<h3>User Stories & Business Value</h3>`;
-        body += `<table><tr><th width="10%">ID</th><th width="30%">Story</th><th width="35%">Detailed Description</th><th width="15%">Priority</th></tr>`;
-        (project.requirements.userStories || []).forEach((s: any) => {
-          body += `<tr>
-            <td><strong>#${s.id || ""}</strong></td>
-            <td>${s.story || ""}</td>
-            <td>${s.description || ""}
-                <div style="margin-top: 8px; font-size: 9pt; color: #64748b;"><strong>Acceptance Criteria:</strong>
-                <ul>${(s.acceptanceCriteria || []).map((ac: string) => `<li>${ac}</li>`).join("")}</ul></div>
-            </td>
-            <td><span class="priority-${(s.priority || "low").toLowerCase()}">${s.priority || ""}</span></td>
-          </tr>`;
-        });
-        body += `</table>`;
-
-        body += `<h3>Strategic Scope Boundaries</h3><p>${project.requirements.scope || ""}</p>`;
+        if (r.scope) {
+          body += `<h3>Scope</h3>`;
+          if (r.scope.inScope?.length) body += `<strong>In Scope:</strong><ul>${r.scope.inScope.map((s: string) => `<li>${s}</li>`).join('')}</ul>`;
+          if (r.scope.outOfScope?.length) body += `<strong>Out of Scope:</strong><ul>${r.scope.outOfScope.map((s: string) => `<li>${s}</li>`).join('')}</ul>`;
+        }
         
-        body += `<h3>Technical & Security Constraints</h3><ul>`;
-        (project.requirements.technicalConstraints || []).forEach((tc: string) => body += `<li>${tc}</li>`);
-        body += `</ul>`;
+        if (r.stakeholders?.length) body += `<h3>Stakeholders</h3><ul>${r.stakeholders.map((s: string) => `<li>${s}</li>`).join('')}</ul>`;
+        if (r.functionalRequirements?.length) body += `<h3>Functional Requirements</h3><ul>${r.functionalRequirements.map((s: string) => `<li>${s}</li>`).join('')}</ul>`;
+        if (r.nonFunctionalRequirements?.length) body += `<h3>Non-Functional Requirements</h3><ul>${r.nonFunctionalRequirements.map((s: string) => `<li>${s}</li>`).join('')}</ul>`;
 
-        body += `<h3>Data Architecture Entities</h3><ul>`;
-        (project.requirements.dataEntities || []).forEach((de: string) => body += `<li>${de}</li>`);
-        body += `</ul>`;
+        const storiesWord = Array.isArray(r.userStories) ? r.userStories : (typeof r.userStories === 'string' && r.userStories.trim().startsWith('[') ? (() => { try { return JSON.parse(r.userStories); } catch { return []; } })() : []);
+        if (storiesWord.length) {
+          body += `<h3>User Stories</h3>`;
+          body += `<table><tr><th width="10%">ID</th><th width="30%">Story</th><th width="35%">Detailed Description</th><th width="15%">Priority</th></tr>`;
+          storiesWord.forEach((s: any) => {
+            body += `<tr>
+              <td><strong>#${s.id || ""}</strong></td>
+              <td>${s.story || ""}</td>
+              <td>${s.description || ""}
+                  <div style="margin-top: 8px; font-size: 9pt; color: #64748b;"><strong>Acceptance Criteria:</strong>
+                  <ul>${(s.acceptanceCriteria || []).map((ac: string) => `<li>${ac}</li>`).join("")}</ul></div>
+              </td>
+              <td><span class="priority-${(s.priority || "low").toLowerCase()}">${s.priority || ""}</span></td>
+            </tr>`;
+          });
+          body += `</table>`;
+        }
+        if (r.assumptionsAndConstraints?.length) body += `<h3>Assumptions & Constraints</h3><ul>${r.assumptionsAndConstraints.map((s: string) => `<li>${s}</li>`).join('')}</ul>`;
       }
 
       if (project.design) {
+        const d = project.design as any;
         body += `<br clear=all style='mso-break-type:section-break'>`;
         body += `<h2>2. System Design Blueprint</h2>`;
-        body += `<h3>Visual Identity & Design Tokens</h3><p>${project.design.designSystem || ""}</p>`;
-        body += `<h3>Modular Component Hierarchy</h3><ul>`;
-        (project.design.componentStructure || []).forEach((c: string) => body += `<li>${c}</li>`);
-        body += `</ul>`;
-        body += `<h3>UX Wireframe & Interaction Specs</h3><div style="background: #f8fafc; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px; font-family: 'Consolas', monospace; font-size: 9pt; color: #334155; white-space: pre-wrap;">${project.design.wireframes || ""}</div>`;
         
-        body += `<h3>API Ecosystem Contracts</h3><table><tr><th>Planned Interface Definitions</th></tr>`;
-        (project.design.apiEndpoints || []).forEach((ae: string) => body += `<tr><td><code>${ae}</code></td></tr>`);
-        body += `</table>`;
+        if (d.hld) {
+          body += `<h3>High-Level Design</h3>`;
+          if (d.hld.systemArchitectureOverview) body += `<p><strong>Architecture Overview:</strong><br/>${d.hld.systemArchitectureOverview}</p>`;
+          if (d.hld.dataFlowDescription) body += `<p><strong>Data Flow:</strong><br/>${d.hld.dataFlowDescription}</p>`;
+          if (d.hld.technologyStackOverview) body += `<p><strong>Tech Stack:</strong><br/>${d.hld.technologyStackOverview}</p>`;
+        }
+        
+        if (d.lld) {
+          body += `<h3>Low-Level Design</h3>`;
+          if (d.lld.detailedComponentDesign) body += `<p><strong>Component Design:</strong><br/>${d.lld.detailedComponentDesign}</p>`;
+          if (d.lld.uiComponentStructure) body += `<p><strong>UI Structure:</strong><br/>${d.lld.uiComponentStructure}</p>`;
+          if (d.lld.apiEndpoints?.length) {
+            body += `<h4>API Endpoints</h4><table><tr><th>Method</th><th>Endpoint</th><th>Request</th><th>Response</th></tr>`;
+            d.lld.apiEndpoints.forEach((ep: any) => {
+              const reqStr = typeof ep.request === 'string' && (ep.request.trim().startsWith('{') || ep.request.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.request), null, 2); } catch { return ep.request; } })() : (typeof ep.request === 'object' ? JSON.stringify(ep.request, null, 2) : ep.request);
+              const resStr = typeof ep.response === 'string' && (ep.response.trim().startsWith('{') || ep.response.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.response), null, 2); } catch { return ep.response; } })() : (typeof ep.response === 'object' ? JSON.stringify(ep.response, null, 2) : ep.response);
+              body += `<tr><td><strong>${ep.method}</strong></td><td><code>${ep.endpoint}</code></td><td><pre style="font-size: 8pt; white-space: pre-wrap;">${reqStr}</pre></td><td><pre style="font-size: 8pt; white-space: pre-wrap;">${resStr}</pre></td></tr>`;
+            });
+            body += `</table>`;
+          }
+        }
+        
+        if (d.databaseDesign?.tables?.length) {
+          body += `<h3>Database Tables</h3><table><tr><th>Table</th><th>Fields</th><th>Relationships</th></tr>`;
+          d.databaseDesign.tables.forEach((t: any) => {
+            body += `<tr><td><strong>${t.name}</strong></td><td><pre style="font-size: 8pt; white-space: pre-wrap;">${t.fields}</pre></td><td><pre style="font-size: 8pt; white-space: pre-wrap;">${t.relationships}</pre></td></tr>`;
+          });
+          body += `</table>`;
+        }
+      }
+
+      if (project.devDocs) {
+        const dd = project.devDocs as any;
+        body += `<br clear=all style='mso-break-type:section-break'>`;
+        body += `<h2>3. Development Documentation</h2>`;
+        if (dd.techStack) body += `<h3>Technology Stack</h3><p>${dd.techStack}</p>`;
+        if (dd.projectStructure) body += `<h3>Project Structure</h3><pre style="font-size: 8pt; background: #f8fafc; padding: 10px; border: 1px solid #e2e8f0;">${dd.projectStructure}</pre>`;
+        if (dd.setupInstructions) body += `<h3>Setup Instructions</h3><p>${dd.setupInstructions}</p>`;
+        if (dd.environmentVariables) body += `<h3>Environment Variables</h3><p>${dd.environmentVariables}</p>`;
+        if (dd.deploymentOverview) body += `<h3>Deployment Overview</h3><p>${dd.deploymentOverview}</p>`;
       }
 
       if (project.tests) {
+        const t = project.tests as any;
         body += `<br clear=all style='mso-break-type:section-break'>`;
-        body += `<h2>3. Quality Assurance & Verification</h2>`;
-        body += `<div class="executive-summary">${project.tests.executiveSummary || ""}</div>`;
+        body += `<h2>4. Quality Assurance & Verification</h2>`;
         
-        body += `<h3>Traceability Matrix & Test Results</h3>`;
-        body += `<table><tr><th>ID</th><th>Verification Scenario</th><th>Severity</th><th>Status</th><th>Notes</th></tr>`;
-        (project.tests.testCases || []).forEach((tc: any) => {
-          body += `<tr>
-            <td><strong>${tc.id || ""}</strong></td>
-            <td>${tc.description || ""}</td>
-            <td><strong>${tc.severity || "Minor"}</strong></td>
-            <td style="color: ${tc.status === "passed" ? "#15803d" : "#b91c1c"}; font-weight: bold;">${(tc.status || "").toUpperCase()}</td>
-            <td>${tc.notes || ""}</td>
-          </tr>`;
-        });
-        body += `</table>`;
-
-        body += `<h3>Senior Code Review Audit</h3><p>${project.tests.codeAudit || ""}</p>`;
+        if (t.testPlan) {
+          body += `<h3>Test Plan</h3>`;
+          if (t.testPlan.testingScope) body += `<p><strong>Scope:</strong> ${t.testPlan.testingScope}</p>`;
+          if (t.testPlan.testingStrategy) body += `<p><strong>Strategy:</strong> ${t.testPlan.testingStrategy}</p>`;
+        }
+        
+        if (t.testExecutionReport?.summary) {
+          body += `<div class="executive-summary"><strong>Execution Summary:</strong><br/>${t.testExecutionReport.summary}</div>`;
+        }
+        
+        if (t.testCases?.length) {
+          body += `<h3>Test Cases</h3>`;
+          body += `<table><tr><th width="10%">ID</th><th width="20%">Description</th><th width="30%">Steps</th><th width="15%">Expected</th><th width="15%">Actual</th><th width="10%">Status</th></tr>`;
+          t.testCases.forEach((tc: any) => {
+            body += `<tr>
+              <td><strong>${tc.id || ""}</strong></td>
+              <td>${tc.description || ""}</td>
+              <td><ol style="margin:0; padding-left:15px;">${(tc.steps || []).map((s: string) => `<li>${s}</li>`).join('')}</ol></td>
+              <td>${tc.expectedResult || ""}</td>
+              <td>${tc.actualResult || ""}</td>
+              <td style="color: ${tc.status === "passed" ? "#15803d" : "#b91c1c"}; font-weight: bold;">${(tc.status || "").toUpperCase()}</td>
+            </tr>`;
+          });
+          body += `</table>`;
+        }
       }
 
       body += `<div class="footer">Generated via Kaizen Dhara Intelligence Engine on ${new Date().toLocaleDateString()}<br/>All Rights Reserved</div></body></html>`;
@@ -531,6 +717,230 @@ const App: React.FC = () => {
     } catch (error) {
       console.error("Word export error:", error);
       addMessage("Orchestrator", "Failed to generate Word documentation. Interface export interrupted.", "error");
+    }
+  };
+
+  const downloadSectionAsMd = async (e: React.MouseEvent, section: "req" | "design" | "devdocs" | "test" | "arch" | "dbSchema" | "apiDocs") => {
+    e.stopPropagation();
+    if (!project) return;
+    try {
+      const { saveAs } = await import("file-saver");
+      let content = "";
+      let filename = "";
+      const r = project.requirements as any;
+      const d = project.design as any;
+      const t = project.tests as any;
+
+      if (section === "req" && r) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_requirements.md`;
+        content += `# ${project.name} - Requirements\n\n`;
+        if (r.projectOverview) content += `## Project Overview\n${r.projectOverview}\n\n`;
+        if (r.businessObjectives) content += `## Business Objectives\n${r.businessObjectives}\n\n`;
+        if (r.scope) {
+          content += `## Scope\n`;
+          if (r.scope.inScope?.length) {
+            content += `### In Scope\n`;
+            r.scope.inScope.forEach((s: string) => content += `- ${s}\n`);
+            content += `\n`;
+          }
+          if (r.scope.outOfScope?.length) {
+            content += `### Out of Scope\n`;
+            r.scope.outOfScope.forEach((s: string) => content += `- ${s}\n`);
+            content += `\n`;
+          }
+        }
+        if (r.stakeholders?.length) {
+          content += `## Stakeholders\n`;
+          r.stakeholders.forEach((s: string) => content += `- ${s}\n`);
+          content += `\n`;
+        }
+        if (r.functionalRequirements?.length) {
+          content += `## Functional Requirements\n`;
+          r.functionalRequirements.forEach((fr: string) => content += `- ${fr}\n`);
+          content += `\n`;
+        }
+        if (r.nonFunctionalRequirements?.length) {
+          content += `## Non-Functional Requirements\n`;
+          r.nonFunctionalRequirements.forEach((nfr: string) => content += `- ${nfr}\n`);
+          content += `\n`;
+        }
+        const storiesMd = Array.isArray(r.userStories) ? r.userStories : (typeof r.userStories === 'string' && r.userStories.trim().startsWith('[') ? (() => { try { return JSON.parse(r.userStories); } catch { return []; } })() : []);
+        if (storiesMd.length) {
+          content += `## User Stories\n`;
+          storiesMd.forEach((s: any) => {
+            content += `### #${s.id} [${s.priority || 'Medium'}] ${s.story}\n`;
+            if (s.description) content += `${s.description}\n`;
+            if (s.acceptanceCriteria?.length) {
+              content += `**Acceptance Criteria:**\n`;
+              s.acceptanceCriteria.forEach((ac: string) => content += `- ${ac}\n`);
+            }
+            content += `\n`;
+          });
+        }
+        if (r.assumptionsAndConstraints?.length) {
+          content += `## Assumptions & Constraints\n`;
+          r.assumptionsAndConstraints.forEach((ac: string) => content += `- ${ac}\n`);
+          content += `\n`;
+        }
+      } else if (section === "design" && d) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_design.md`;
+        content += `# ${project.name} - Design Specification\n\n`;
+        
+        if (d.hld) {
+          content += `## High-Level Design (HLD)\n\n`;
+          if (d.hld.systemArchitectureOverview) content += `### System Architecture Overview\n${d.hld.systemArchitectureOverview}\n\n`;
+          if (d.hld.dataFlowDescription) content += `### Data Flow Description\n${d.hld.dataFlowDescription}\n\n`;
+          if (d.hld.technologyStackOverview) content += `### Technology Stack Overview\n${d.hld.technologyStackOverview}\n\n`;
+          if (d.hld.externalIntegrations?.length) {
+            content += `### External Integrations\n`;
+            d.hld.externalIntegrations.forEach((ei: string) => content += `- ${ei}\n`);
+            content += `\n`;
+          }
+        }
+        
+        if (d.lld) {
+          content += `## Low-Level Design (LLD)\n\n`;
+          if (d.lld.detailedComponentDesign) content += `### Detailed Component Design\n${d.lld.detailedComponentDesign}\n\n`;
+          if (d.lld.uiComponentStructure) content += `### UI Component Structure\n${d.lld.uiComponentStructure}\n\n`;
+          if (d.lld.dataModels) content += `### Data Models\n\`\`\`\n${d.lld.dataModels}\n\`\`\`\n\n`;
+          
+          if (d.lld.apiEndpoints?.length) {
+            content += `### API Endpoints\n`;
+            d.lld.apiEndpoints.forEach((ep: any) => {
+              content += `#### ${ep.method} ${ep.endpoint}\n`;
+              if (ep.request) {
+                const reqStr = typeof ep.request === 'string' && (ep.request.trim().startsWith('{') || ep.request.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.request), null, 2); } catch { return ep.request; } })() : (typeof ep.request === 'object' ? JSON.stringify(ep.request, null, 2) : ep.request);
+                content += `**Request:**\n\`\`\`json\n${reqStr}\n\`\`\`\n`;
+              }
+              if (ep.response) {
+                const resStr = typeof ep.response === 'string' && (ep.response.trim().startsWith('{') || ep.response.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.response), null, 2); } catch { return ep.response; } })() : (typeof ep.response === 'object' ? JSON.stringify(ep.response, null, 2) : ep.response);
+                content += `**Response:**\n\`\`\`json\n${resStr}\n\`\`\`\n`;
+              }
+            });
+            content += `\n`;
+          }
+        }
+        
+        if (d.databaseDesign?.tables?.length) {
+          content += `## Database Design Tables\n\n`;
+          d.databaseDesign.tables.forEach((table: any) => {
+            content += `### Table: ${table.name}\n`;
+            if (table.fields) content += `**Fields:**\n${table.fields}\n\n`;
+            if (table.relationships) content += `**Relationships:**\n${table.relationships}\n\n`;
+          });
+        }
+      } else if (section === "devdocs" && project.devDocs) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_devdocs.md`;
+        const dd = project.devDocs;
+        content += `# Development Documentation\n\n`;
+        if (dd.techStack) content += `## Tech Stack\n${dd.techStack}\n\n`;
+        if (dd.projectStructure) content += `## Structure\n\`\`\`\n${dd.projectStructure}\n\`\`\`\n\n`;
+        if (dd.setupInstructions) content += `## Setup Instructions\n${dd.setupInstructions}\n\n`;
+        if (dd.environmentVariables) content += `## Env Variables\n${dd.environmentVariables}\n\n`;
+        if (dd.deploymentOverview) content += `## Deployment\n${dd.deploymentOverview}\n\n`;
+      } else if (section === "test" && t) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_verification.md`;
+        content += `# ${project.name} - Verification Report\n\n`;
+        
+        if (t.testPlan) {
+          content += `## Test Plan\n\n`;
+          if (t.testPlan.testingScope) content += `### Scope\n${t.testPlan.testingScope}\n\n`;
+          if (t.testPlan.testingStrategy) content += `### Strategy\n${t.testPlan.testingStrategy}\n\n`;
+          if (t.testPlan.toolsAndEnvironment) content += `### Tools & Environment\n${t.testPlan.toolsAndEnvironment}\n\n`;
+          if (t.testPlan.entryExitCriteria) content += `### Entry/Exit Criteria\n${t.testPlan.entryExitCriteria}\n\n`;
+        }
+        
+        if (t.testExecutionReport) {
+          content += `## Execution Report\n\n`;
+          if (t.testExecutionReport.summary) content += `### Summary\n${t.testExecutionReport.summary}\n\n`;
+          if (t.testExecutionReport.passFailMetrics) content += `### Metrics\n${t.testExecutionReport.passFailMetrics}\n\n`;
+          if (t.testExecutionReport.defectSummary) content += `### Defects\n${t.testExecutionReport.defectSummary}\n\n`;
+        }
+        
+        if (t.testDesign) {
+          content += `## Test Design\n\n`;
+          if (t.testDesign.testCoverage) content += `### Coverage\n${t.testDesign.testCoverage}\n\n`;
+          if (t.testDesign.testScenarios?.length) {
+            content += `### Scenarios\n`;
+            t.testDesign.testScenarios.forEach((sc: string) => content += `- ${sc}\n`);
+            content += `\n`;
+          }
+        }
+
+        if (t.testCases?.length) {
+          content += `## Detailed Test Cases\n\n`;
+          t.testCases.forEach((tc: any) => {
+            content += `### [${(tc.status || "PENDING").toUpperCase()}] ${tc.id}\n`;
+            if (tc.description) content += `**Description:** ${tc.description}\n\n`;
+            if (tc.steps?.length) {
+              content += `**Steps:**\n`;
+              tc.steps.forEach((step: string, i: number) => content += `${i + 1}. ${step}\n`);
+              content += `\n`;
+            }
+            if (tc.expectedResult) content += `**Expected Result:** ${tc.expectedResult}\n\n`;
+            if (tc.actualResult) content += `**Actual Result:** ${tc.actualResult}\n\n`;
+          });
+        }
+      } else if (section === "arch" && d) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_architecture.md`;
+        content += `# ${project.name} - Architectural Diagrams\n\n`;
+        const archDiag = d.hld?.architectureDiagram || d.architectureDiagram;
+        const compDiag = d.hld?.componentDiagram || d.componentDiagram;
+        const erDiag = d.databaseDesign?.erDiagram || d.erDiagram;
+        const seqDiag = d.lld?.sequenceFlows || d.sequenceDiagram;
+        const lldDiag = d.lld?.classDiagram || d.lldDiagram;
+
+        if (archDiag) content += `## System Architecture Diagram\n\`\`\`mermaid\n${archDiag}\n\`\`\`\n\n`;
+        if (compDiag) content += `## Component Hierarchy Diagram\n\`\`\`mermaid\n${compDiag}\n\`\`\`\n\n`;
+        if (erDiag) content += `## ER Diagram\n\`\`\`mermaid\n${erDiag}\n\`\`\`\n\n`;
+        if (seqDiag) content += `## Sequence Diagram\n\`\`\`mermaid\n${seqDiag}\n\`\`\`\n\n`;
+        if (lldDiag) content += `## Low Level Design Diagram\n\`\`\`mermaid\n${lldDiag}\n\`\`\`\n\n`;
+      } else if (section === "dbSchema" && d) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_database_schema.md`;
+        content += `# ${project.name} - Database Schemas\n\n`;
+        const dataModels = d.lld?.dataModels || d.dataModels || d.wireframes;
+        const tables = d.databaseDesign?.tables || d.tables || [];
+
+        if (dataModels) {
+          content += `## Data Models\n\n\`\`\`\n${dataModels}\n\`\`\`\n\n`;
+        }
+        if (Array.isArray(tables) && tables.length > 0) {
+          content += `## Database Tables\n\n`;
+          tables.forEach((table: any) => {
+            content += `### Table: ${table.name}\n`;
+            if (table.fields) content += `**Fields:**\n${table.fields}\n\n`;
+            if (table.relationships) content += `**Relationships:**\n${table.relationships}\n\n`;
+          });
+        }
+      } else if (section === "apiDocs" && d) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_api_docs.md`;
+        content += `# ${project.name} - REST API Documents\n\n`;
+        const endpoints = d.lld?.apiEndpoints || d.apiEndpoints || d.apiContracts || [];
+        if (endpoints.length > 0) {
+          endpoints.forEach((ep: any) => {
+            if (typeof ep === 'string') {
+              content += `## ${ep}\n\n`;
+            } else {
+              content += `## ${ep.method} ${ep.endpoint}\n\n`;
+              if (ep.request) {
+                const reqStr = typeof ep.request === 'string' && (ep.request.trim().startsWith('{') || ep.request.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.request), null, 2); } catch { return ep.request; } })() : (typeof ep.request === 'object' ? JSON.stringify(ep.request, null, 2) : ep.request);
+                content += `### Request\n\`\`\`json\n${reqStr}\n\`\`\`\n\n`;
+              }
+              if (ep.response) {
+                const resStr = typeof ep.response === 'string' && (ep.response.trim().startsWith('{') || ep.response.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.response), null, 2); } catch { return ep.response; } })() : (typeof ep.response === 'object' ? JSON.stringify(ep.response, null, 2) : ep.response);
+                content += `### Response\n\`\`\`json\n${resStr}\n\`\`\`\n\n`;
+              }
+            }
+          });
+        }
+      }
+
+      if (!content) { addMessage("Orchestrator", "Artifact content is empty.", "error"); return; }
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      saveAs(blob, filename);
+      addMessage("Orchestrator", `Downloaded ${filename}`);
+    } catch (error) {
+      addMessage("Orchestrator", "Failed to download artifact.", "error");
     }
   };
 
@@ -563,6 +973,7 @@ const App: React.FC = () => {
     customPrompt: string,
     isRemodify = false,
     fileAttachments?: any[],
+    activeBrdData?: BRDStructuredData | null,
   ) => {
     if (!agentService.current) return;
 
@@ -571,12 +982,20 @@ const App: React.FC = () => {
       p ? { ...p, isProcessing: true, waitingForApproval: false } : null,
     );
 
+    const effectiveBrdData = activeBrdData !== undefined ? activeBrdData : brdData;
+
     try {
       if (isRemodify) {
         if (!project) return;
         addMessage(
           "Requirement",
           `Refining requirements with feedback: "${customPrompt}"...`,
+          "thinking",
+        );
+      } else if (effectiveBrdData?.isValid) {
+        addMessage(
+          "Requirement",
+          `BRD Document Mode — Extracting requirements from "${effectiveBrdData.sourceFiles.join(', ')}" (${effectiveBrdData.functional_requirements.length} FRs, ${effectiveBrdData.user_flows.length} user flows). No hallucination mode active.`,
           "thinking",
         );
       } else {
@@ -592,6 +1011,8 @@ const App: React.FC = () => {
       const reqs = await agentService.current.runRequirementAgent(
         customPrompt,
         effectiveAttachments,
+        effectiveBrdData,
+        figmaData,
       );
 
       setProject((p) => {
@@ -648,7 +1069,7 @@ const App: React.FC = () => {
       // Fire main agent + parallel validator concurrently
       const reqSnapshot = project.requirements;
       const [design, reqValidation] = await Promise.all([
-        agentService.current.runDesignAgent(reqSnapshot, selectedTheme, feedback),
+        agentService.current.runDesignAgent(reqSnapshot, selectedTheme, feedback, figmaData),
         agentService.current.runParallelReqValidation(reqSnapshot).catch(() => null),
       ]);
 
@@ -715,22 +1136,28 @@ const App: React.FC = () => {
         "thinking",
       );
 
-      const existingCode = isRemodify ? project.code || undefined : undefined;
-      const [design, requirements] = [project.design, project.requirements];
-
-      // Fire main agent + parallel design reviewer concurrently
       const [code, designReview] = await Promise.all([
         agentService.current.runDevelopmentAgent(
-          design, requirements, project.prompt, selectedTheme, feedback, existingCode,
+          project.design,
+          project.requirements,
+          project.prompt,
+          selectedTheme,
+          feedback,
+          project.code || undefined,
+          figmaData
         ),
-        agentService.current.runParallelDesignReview(design, requirements).catch(() => null),
+        agentService.current.runParallelDesignReview(project.design, project.requirements).catch(() => null),
       ]);
+
+      // Generate DevDocs after code is ready
+      const devDocs = await agentService.current.runDevDocsAgent(code, project.requirements, project.design);
 
       setProject((p) =>
         p
           ? {
               ...p,
               code,
+              devDocs,
               designReview: designReview ?? p.designReview,
               currentStep: 3,
               isProcessing: false,
@@ -898,24 +1325,42 @@ const App: React.FC = () => {
       return;
     }
 
+    // BRD Validation gate: if a document was uploaded but extraction failed, warn the user
+    const hasDocuments = processedFiles.some(f => f.status === 'done' && f.category === 'document');
+    if (hasDocuments && brdData && !brdData.isValid) {
+      addToast({
+        type: 'error',
+        title: 'BRD Validation Failed',
+        message: brdData.validationError || 'Insufficient structured data extracted from document.',
+        duration: 10000,
+      });
+      // Allow proceeding — fall back to generic mode
+    }
+
     const displayPrompt = input.trim() || (selectedTestCase ? TEST_CASE_TEMPLATES[selectedTestCase].label : 'File-based generation');
+    const brdLabel = brdData?.isValid ? ` [BRD: ${brdData.documentType}, ${brdData.functional_requirements.length} FRs]` : '';
     addMessage(
       "Orchestrator",
-      `Initializing automated SDLC for: "${displayPrompt}"`,
+      `Initializing automated SDLC for: "${displayPrompt}"${brdLabel}`,
       "thinking",
     );
 
     addToast({
       type: 'info',
       title: 'Pipeline Started',
-      message: `🚀 SDLC pipeline initialized. Starting requirements analysis...`,
+      message: brdData?.isValid
+        ? `BRD mode active — generating from "${brdData.sourceFiles.join(', ')}" with strict no-hallucination rules.`
+        : `SDLC pipeline initialized. Starting requirements analysis...`,
       duration: 5000,
     });
 
     await new Promise((r) => setTimeout(r, 800));
 
-    // Start with Requirements directly — pass attachments directly (don't rely on async setState)
-    await runRequirementPhase(enrichedPrompt, false, allAttachments);
+    // Capture brdData snapshot to pass directly (avoid stale closure)
+    const activeBrdData = brdData?.isValid ? brdData : null;
+
+    // Start with Requirements — pass attachments and BRD data directly
+    await runRequirementPhase(enrichedPrompt, false, allAttachments, activeBrdData);
   };
 
   // Correction to handleApprove ensuring correct flow
@@ -974,6 +1419,11 @@ const App: React.FC = () => {
           : JSON.stringify(project.design)
         : undefined,
       code: project.code,
+      devDocs: project.devDocs
+        ? typeof project.devDocs === "string"
+          ? project.devDocs
+          : JSON.stringify(project.devDocs)
+        : undefined,
       tests: project.tests
         ? typeof project.tests === "string"
           ? project.tests
@@ -1320,6 +1770,69 @@ const App: React.FC = () => {
                   onFilesChange={setProcessedFiles}
                   disabled={project?.isProcessing}
                 />
+
+                {/* FIGMA INTEGRATION SECTION */}
+                <div className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-3xl p-6 shadow-2xl relative overflow-hidden group mt-4">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-fuchsia-500/5 blur-[60px] rounded-full -z-10 group-hover:bg-fuchsia-500/10 transition-colors" />
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-400 flex items-center justify-center">
+                      <Layers className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-200">Figma Design Integration</h3>
+                      <p className="text-[10px] text-slate-500">Enable design-driven generation from file link</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        placeholder="https://www.figma.com/file/xxxx/Design-Name"
+                        value={figmaLink}
+                        onChange={(e) => setFigmaLink(e.target.value)}
+                        className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-300 focus:border-fuchsia-500/50 outline-none transition-all placeholder:text-slate-700"
+                      />
+                      {figmaData && (
+                        <div className="absolute right-3 top-2.5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleFetchFigma}
+                      disabled={!figmaLink || isFetchingFigma}
+                      className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-200 rounded-xl transition-all border border-slate-700 flex items-center gap-2 group/btn"
+                    >
+                      {isFetchingFigma ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <>
+                          <span className="text-xs font-bold">Link</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  
+                  {figmaData && (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <div className="px-2 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-1.5">
+                        <Box className="w-3 h-3 text-emerald-400" />
+                        <span className="text-[10px] font-medium text-emerald-400">{figmaData.name}</span>
+                      </div>
+                      <div className="px-2 py-1 rounded-md bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-1.5">
+                        <FileText className="w-3 h-3 text-indigo-400" />
+                        <span className="text-[10px] font-medium text-indigo-400">{figmaData.pages.length} Pages</span>
+                      </div>
+                      {figmaData.theme.fonts.length > 0 && (
+                        <div className="px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/20 flex items-center gap-1.5">
+                          <span className="text-[10px] font-medium text-amber-400">{figmaData.theme.fonts[0]} + {figmaData.theme.fonts.length - 1} Fonts</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {/* Smart domain detection indicator */}
                 {processedFiles.some(f => f.status === 'done' && f.category !== 'image') && !selectedTestCase && (() => {
                   const fileText = processedFiles.filter(f => f.status === 'done' && f.category !== 'image').map(f => f.content).join(' ');
@@ -1334,6 +1847,81 @@ const App: React.FC = () => {
                   }
                   return null;
                 })()}
+
+                {/* BRD Parsed Badge + Preview */}
+                {brdData && (
+                  <div className={`mt-2 rounded-xl border overflow-hidden transition-all ${
+                    brdData.isValid
+                      ? 'bg-emerald-500/5 border-emerald-500/20'
+                      : 'bg-rose-500/5 border-rose-500/20'
+                  }`}>
+                    <button
+                      onClick={() => setShowBRDPreview(v => !v)}
+                      className="w-full flex items-center justify-between px-3 py-2 text-left"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm">{brdData.isValid ? '📋' : '⚠️'}</span>
+                        <div>
+                          <span className={`text-[9px] font-black uppercase tracking-wider ${brdData.isValid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {brdData.isValid ? `Generated from ${brdData.documentType} Document` : 'BRD Parse Warning'}
+                          </span>
+                          <p className="text-[8px] text-slate-500 mt-0.5">
+                            {brdData.isValid
+                              ? `${brdData.functional_requirements.length} FRs · ${brdData.user_flows.length} Flows · ${brdData.modules.length} Modules`
+                              : brdData.validationError?.substring(0, 60) + '…'
+                            }
+                          </p>
+                        </div>
+                      </div>
+                      <svg className={`w-3 h-3 text-slate-500 transition-transform ${showBRDPreview ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+
+                    {showBRDPreview && brdData.isValid && (
+                      <div className="px-3 pb-3 space-y-2 border-t border-emerald-500/10">
+                        <p className="text-[8px] text-slate-500 uppercase tracking-widest font-bold mt-2">Extracted Requirements Preview</p>
+
+                        {brdData.functional_requirements.length > 0 && (
+                          <div>
+                            <p className="text-[8px] font-bold text-cyan-400 mb-1">Functional ({brdData.functional_requirements.length})</p>
+                            <div className="space-y-0.5 max-h-32 overflow-y-auto pr-1">
+                              {brdData.functional_requirements.map((fr, i) => (
+                                <p key={i} className="text-[8px] text-slate-400 leading-relaxed">
+                                  <span className="text-cyan-600 font-mono">FR-{i + 1}</span> {fr.length > 80 ? fr.substring(0, 80) + '…' : fr}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {brdData.user_flows.length > 0 && (
+                          <div>
+                            <p className="text-[8px] font-bold text-fuchsia-400 mb-1">User Flows ({brdData.user_flows.length})</p>
+                            <div className="space-y-0.5 max-h-20 overflow-y-auto pr-1">
+                              {brdData.user_flows.map((uf, i) => (
+                                <p key={i} className="text-[8px] text-slate-400 leading-relaxed">
+                                  <span className="text-fuchsia-600 font-mono">UF-{i + 1}</span> {uf.length > 80 ? uf.substring(0, 80) + '…' : uf}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {brdData.entities.length > 0 && (
+                          <div>
+                            <p className="text-[8px] font-bold text-amber-400 mb-1">Entities ({brdData.entities.length})</p>
+                            <div className="flex flex-wrap gap-1">
+                              {brdData.entities.slice(0, 8).map((e, i) => (
+                                <span key={i} className="text-[7px] px-1.5 py-0.5 bg-amber-500/10 border border-amber-500/20 rounded text-amber-400">{e.length > 20 ? e.substring(0, 20) + '…' : e}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </section>
 
@@ -1388,7 +1976,10 @@ const App: React.FC = () => {
                       ? "done"
                       : "idle"
                 }
-                description="Synthesizes raw prompts into structured BA documentation."
+                description={brdData?.isValid
+                  ? `BRD Mode — ${brdData.functional_requirements.length} FRs extracted from ${brdData.documentType}. Strict no-hallucination mode.`
+                  : "Synthesizes raw prompts into structured BA documentation."
+                }
                 icon={
                   <svg
                     className="w-5 h-5"
@@ -2011,458 +2602,180 @@ const App: React.FC = () => {
                         <div className="space-y-8">
                           {/* REQUIREMENT SPEC */}
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  req: !prev.req,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, req: !prev.req }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-cyan-600/20 text-cyan-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Requirement Spec
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Requirement Spec</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.req ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "req")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.req ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7"/></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.req && (
                               <div className="mt-4">
                                 {project?.requirements ? (
                                   <div className="space-y-6">
-                                    {project.requirements.executiveSummary && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-xs text-slate-400 leading-relaxed italic">
-                                        {project.requirements.executiveSummary}
-                                      </div>
-                                    )}
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                        User Stories & Acceptance Criteria
-                                      </h4>
-                                      <ul className="space-y-4">
-                                        {(Array.isArray(
-                                          project.requirements.userStories,
-                                        )
-                                          ? project.requirements.userStories
-                                          : []
-                                        ).map((s: any, i: number) => (
-                                          <li
-                                            key={i}
-                                            className="text-xs text-slate-400 bg-slate-800/30 p-3 rounded-xl border border-slate-800/50"
-                                          >
-                                              <div className="flex-1">
-                                                <div className="flex gap-2 mb-1.5">
-                                                  <span className="text-cyan-500 font-mono font-bold">
-                                                    #{s.id || i + 1}
-                                                  </span>
-                                                  <span className="font-medium text-slate-200">
-                                                    {typeof s === "string"
-                                                      ? s
-                                                      : s.story}
-                                                  </span>
-                                                  {s.priority && (
-                                                    <span
-                                                      className={`ml-auto text-[9px] uppercase font-bold px-2 py-0.5 rounded-full ${s.priority === "High" ? "bg-rose-500/20 text-rose-400" : "bg-slate-700 text-slate-400"}`}
-                                                    >
-                                                      {s.priority}
-                                                    </span>
-                                                  )}
-                                                </div>
-                                                {s.description && (
-                                                  <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
-                                                    {s.description}
-                                                  </p>
-                                                )}
-                                              </div>
-
-                                            {Array.isArray(
-                                              s.acceptanceCriteria,
-                                            ) &&
-                                              s.acceptanceCriteria.length >
-                                                0 && (
-                                                <ul className="pl-8 space-y-1 list-disc marker:text-slate-600">
-                                                  {s.acceptanceCriteria.map(
-                                                    (ac: string, j: number) => (
-                                                      <li
-                                                        key={j}
-                                                        className="text-slate-500"
-                                                      >
-                                                        {ac}
-                                                      </li>
-                                                    ),
-                                                  )}
-                                                </ul>
-                                              )}
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-
-                                    <div className="grid grid-cols-1 gap-4">
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed">
-                                        <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">
-                                          Scope Context
-                                        </span>
-                                        {project.requirements.scope}
-                                      </div>
-
-                                      {Array.isArray(
-                                        project.requirements
-                                          .technicalConstraints,
-                                      ) && (
-                                        <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed">
-                                          <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">
-                                            Technical Constraints
-                                          </span>
-                                          <ul className="list-disc pl-4 space-y-1">
-                                            {project.requirements.technicalConstraints.map(
-                                              (tc: string, k: number) => (
-                                                <li key={k}>{tc}</li>
-                                              ),
-                                            )}
-                                          </ul>
+                                    {(() => {
+                                      const r = project.requirements as any;
+                                      const overview = r.projectOverview || r.executiveSummary;
+                                      const scopeObj = typeof r.scope === 'object' && r.scope !== null ? r.scope : null;
+                                      const scopeStr = typeof r.scope === 'string' ? r.scope : null;
+                                      return (<>
+                                        {overview && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-cyan-400">Project Overview</h4><div className="text-xs text-slate-400 leading-relaxed bg-slate-800/30 p-4 rounded-xl border border-slate-800/50">{overview}</div></div>}
+                                        {r.businessObjectives && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-cyan-400">Business Objectives</h4><div className="text-xs text-slate-400 leading-relaxed bg-slate-800/30 p-4 rounded-xl border border-slate-800/50">{r.businessObjectives}</div></div>}
+                                        {(scopeObj || scopeStr) && (
+                                          <div className="grid grid-cols-2 gap-4">
+                                            {scopeObj ? (<>
+                                              {scopeObj.inScope && <div className="p-4 bg-slate-950 rounded-2xl border border-emerald-900/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-emerald-400 mb-2 uppercase tracking-tighter">In Scope</span><ul className="list-disc pl-4 space-y-1">{scopeObj.inScope.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                              {scopeObj.outOfScope && <div className="p-4 bg-slate-950 rounded-2xl border border-rose-900/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-rose-400 mb-2 uppercase tracking-tighter">Out of Scope</span><ul className="list-disc pl-4 space-y-1">{scopeObj.outOfScope.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                            </>) : <div className="col-span-2 p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Scope</span>{scopeStr}</div>}
+                                          </div>
+                                        )}
+                                        {r.stakeholders && r.stakeholders.length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Stakeholders</span><ul className="list-disc pl-4 space-y-1">{r.stakeholders.map((s: string, k: number) => <li key={k}>{s}</li>)}</ul></div>}
+                                        <div className="grid grid-cols-2 gap-4">
+                                          {r.functionalRequirements && r.functionalRequirements.length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Functional Requirements</span><ul className="list-disc pl-4 space-y-1">{r.functionalRequirements.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                          {r.nonFunctionalRequirements && r.nonFunctionalRequirements.length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Non-Functional Requirements</span><ul className="list-disc pl-4 space-y-1">{r.nonFunctionalRequirements.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                          {r.technicalConstraints && r.technicalConstraints.length > 0 && !r.nonFunctionalRequirements && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Technical Constraints</span><ul className="list-disc pl-4 space-y-1">{r.technicalConstraints.map((tc: string, k: number) => <li key={k}>{tc}</li>)}</ul></div>}
                                         </div>
-                                      )}
-                                    </div>
+                                        <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">User Stories & Acceptance Criteria</h4>
+                                          <ul className="space-y-4">{(Array.isArray(r.userStories) ? r.userStories : (typeof r.userStories === 'string' && r.userStories.trim().startsWith('[') ? (() => { try { return JSON.parse(r.userStories); } catch { return []; } })() : [])).map((s: any, i: number) => (
+                                            <li key={i} className="text-xs text-slate-400 bg-slate-800/30 p-3 rounded-xl border border-slate-800/50">
+                                              <div className="flex gap-2 mb-1.5">
+                                                <span className="text-cyan-500 font-mono font-bold">#{s.id || i + 1}</span>
+                                                <span className="font-medium text-slate-200">{typeof s === "string" ? s : s.story}</span>
+                                                {s.priority && <span className={`ml-auto text-[9px] uppercase font-bold px-2 py-0.5 rounded-full ${s.priority === "High" ? "bg-rose-500/20 text-rose-400" : "bg-slate-700 text-slate-400"}`}>{s.priority}</span>}
+                                              </div>
+                                              {s.description && <p className="text-[11px] text-slate-500 mb-2 leading-relaxed">{s.description}</p>}
+                                              {Array.isArray(s.acceptanceCriteria) && s.acceptanceCriteria.length > 0 && <ul className="pl-8 mt-2 space-y-1 list-disc marker:text-slate-600">{s.acceptanceCriteria.map((ac: string, j: number) => <li key={j} className="text-slate-500">{ac}</li>)}</ul>}
+                                            </li>
+                                          ))}</ul>
+                                        </div>
+                                        {(r.assumptionsAndConstraints || r.assumptions) && (r.assumptionsAndConstraints || r.assumptions).length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Assumptions & Constraints</span><ul className="list-disc pl-4 space-y-1">{(r.assumptionsAndConstraints || r.assumptions).map((tc: string, k: number) => <li key={k}>{tc}</li>)}</ul></div>}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Documentation generation in progress...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">Documentation generation in progress...</p>}
                               </div>
                             )}
                           </section>
 
                           {/* DESIGN SPECIFICATION */}
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  design: !prev.design,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, design: !prev.design }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  System Design
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">System Design</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.design ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "design")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.design ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7"/></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.design && (
                               <div className="mt-4">
                                 {project?.design ? (
                                   <div className="space-y-6">
-                                    {project.design.designSystem && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter text-[11px]">
-                                          Visual Theme & Design System
-                                        </span>
-                                        <div className="text-[11px] text-slate-500 leading-relaxed italic">
-                                          {project.design.designSystem}
-                                        </div>
-                                      </div>
-                                    )}
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                        Wireframe Concepts
-                                      </h4>
-                                      <div className="text-xs text-slate-400 whitespace-pre-wrap leading-relaxed bg-slate-800/20 p-4 rounded-xl border border-slate-800/50 font-mono">
-                                        {project.design.wireframes}
-                                      </div>
-                                    </div>
-
-                                    {project.design.apiEndpoints && (
-                                      <div>
-                                        <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                          API Contracts
-                                        </h4>
-                                        <div className="space-y-2">
-                                          {(Array.isArray(
-                                            project.design.apiEndpoints,
-                                          )
-                                            ? project.design.apiEndpoints
-                                            : []
-                                          ).map((ep: string, k: number) => (
-                                            <div
-                                              key={k}
-                                              className="text-[10px] font-mono text-emerald-400 bg-emerald-950/30 px-3 py-2 rounded-lg border border-emerald-900/50 truncate"
-                                            >
-                                              {ep}
-                                            </div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    )}
+                                    {(() => {
+                                      const d = project.design as any;
+                                      const stack = d.hld?.technologyStackOverview || d.designSystem;
+                                      const integrations = d.hld?.externalIntegrations || [];
+                                      const dataModels = d.lld?.dataModels || d.wireframes;
+                                      const endpoints: any[] = d.lld?.apiEndpoints || d.apiEndpoints || [];
+                                      return (<>
+                                        {(stack || integrations.length > 0) && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter text-[11px]">Technology Stack & Integrations</span><div className="text-[11px] text-slate-500 leading-relaxed">{stack && <><strong>Stack:</strong> {stack}<br/><br/></>}{integrations.length > 0 && <><strong>Integrations:</strong> {integrations.join(', ')}</>}</div></div>}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Design blueprints pending...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">Design blueprints pending...</p>}
+                              </div>
+                            )}
+                          </section>
+
+                          {/* DEVELOPMENT DOCUMENTATION */}
+                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, devdocs: !prev.devdocs }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg bg-orange-600/20 text-orange-500 flex items-center justify-center">
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
+                                </div>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Development Documentation</h3>
+                              </div>
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "devdocs")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-orange-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.devdocs ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7"/></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>}
+                              </div>
+                            </div>
+                            {expandedDocs.devdocs && (
+                              <div className="mt-4">
+                                {project?.devDocs ? (
+                                  <div className="space-y-6">
+                                    <div className="grid grid-cols-2 gap-4">
+                                      {project.devDocs.techStack && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-orange-400 mb-2 uppercase tracking-tighter">Technology Stack</span>{project.devDocs.techStack}</div>}
+                                      {project.devDocs.projectStructure && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed max-h-48 overflow-y-auto"><span className="block font-bold text-orange-400 mb-2 uppercase tracking-tighter">Project Structure</span><pre className="text-[10px] font-mono leading-tight">{project.devDocs.projectStructure}</pre></div>}
+                                    </div>
+                                    {project.devDocs.setupInstructions && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-400 font-mono whitespace-pre-wrap leading-relaxed"><span className="block font-bold text-orange-400 mb-2 uppercase tracking-tighter font-sans">Setup Instructions</span>{project.devDocs.setupInstructions}</div>}
+                                    {project.devDocs.deploymentOverview && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-400 leading-relaxed"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Deployment & Environment</span>{project.devDocs.environmentVariables && <><strong>Environment Variables:</strong> {project.devDocs.environmentVariables}<br/><br/></>}<strong>Deployment Overview:</strong> {project.devDocs.deploymentOverview}</div>}
+                                  </div>
+                                ) : <p className="text-xs text-slate-600 italic">Development documentation generation in progress...</p>}
                               </div>
                             )}
                           </section>
 
                           {/* VERIFICATION REPORT */}
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  test: !prev.test,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, test: !prev.test }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-emerald-600/20 text-emerald-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Verification Report
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Verification Report</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.test ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "test")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.test ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7"/></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.test && (
                               <div className="mt-4">
                                 {project?.tests ? (
                                   <div className="space-y-6">
-                                    {project.tests.executiveSummary && (
-                                      <div className="p-4 bg-emerald-950/20 rounded-xl border border-emerald-900/30 mb-4">
-                                        <div className="text-[10px] font-bold text-emerald-500 uppercase mb-1">
-                                          Executive Summary
-                                        </div>
-                                        <div className="text-sm font-medium text-emerald-300">
-                                          {project.tests.executiveSummary}
-                                        </div>
-                                      </div>
-                                    )}
-
-                                    <div className="flex gap-4">
-                                      <div className="flex-1 bg-slate-800/50 p-3 rounded-xl">
-                                        <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">
-                                          Stability Score
-                                        </div>
-                                        <div className="text-sm font-bold text-slate-300">
-                                          98.2%
-                                        </div>
-                                      </div>
-                                      <div className="flex-1 bg-slate-800/50 p-3 rounded-xl">
-                                        <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">
-                                          Total Coverage
-                                        </div>
-                                        <div className="text-sm font-bold text-slate-300">
-                                          85%
-                                        </div>
-                                      </div>
-                                    </div>
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-mt-2">
-                                        Verification Pass Strategy
-                                      </h4>
-                                      <ul className="space-y-4">
-                                        {(Array.isArray(project.tests.testCases)
-                                          ? project.tests.testCases
-                                          : []
-                                        ).map((tc: any, i: number) => (
-                                          <li
-                                            key={i}
-                                            className="flex items-start gap-4 text-[13px] text-slate-400 bg-slate-800/20 p-4 rounded-2xl border border-slate-800/50"
-                                          >
-                                            <div
-                                              className={`w-5 h-5 rounded-full flex items-center justify-center mt-0.5 flex-shrink-0 ${tc.status === "passed" ? "bg-emerald-500/20 text-emerald-500" : "bg-rose-500/20 text-rose-500"}`}
-                                            >
-                                              {tc.status === "passed" ? (
-                                                <CheckCircle2 className="w-3 h-3" />
-                                              ) : (
-                                                <AlertCircle className="w-3 h-3" />
-                                              )}
-                                            </div>
-                                            <div className="flex-1">
-                                              <div className="flex items-center gap-3 mb-2">
-                                                <span className="font-mono font-bold text-slate-500 text-[10px]">
-                                                  ID: {tc.id || i + 1}
-                                                </span>
-                                                {tc.severity && (
-                                                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-widest ${tc.severity === 'Critical' ? 'bg-rose-500 text-white' : tc.severity === 'Major' ? 'bg-amber-500 text-white' : 'bg-slate-700 text-slate-400'}`}>
-                                                    {tc.severity}
-                                                  </span>
-                                                )}
-                                                <span className={`ml-auto text-[10px] font-bold uppercase ${tc.status === 'passed' ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                                  {tc.status}
-                                                </span>
+                                    {(() => {
+                                      const t = project.tests as any;
+                                      return (<>
+                                        {t.testPlan && <div className="p-4 bg-emerald-950/20 rounded-xl border border-emerald-900/30"><div className="text-[10px] font-bold text-emerald-500 uppercase mb-2">Test Plan Overview</div><div className="text-xs text-slate-400 space-y-2">{t.testPlan.testingScope && <div><strong className="text-slate-300">Scope:</strong> {t.testPlan.testingScope}</div>}{t.testPlan.testingStrategy && <div><strong className="text-slate-300">Strategy:</strong> {t.testPlan.testingStrategy}</div>}{t.testPlan.toolsAndEnvironment && <div><strong className="text-slate-300">Tools:</strong> {t.testPlan.toolsAndEnvironment}</div>}{t.testPlan.entryExitCriteria && <div><strong className="text-slate-300">Entry/Exit:</strong> {t.testPlan.entryExitCriteria}</div>}</div></div>}
+                                        {t.executiveSummary && !t.testPlan && <div className="p-4 bg-emerald-950/20 rounded-xl border border-emerald-900/30"><div className="text-[10px] font-bold text-emerald-500 uppercase mb-1">Executive Summary</div><div className="text-sm font-medium text-emerald-300">{t.executiveSummary}</div></div>}
+                                        {t.testExecutionReport && <div className="flex gap-4"><div className="flex-1 bg-slate-800/50 p-3 rounded-xl border border-slate-800/50"><div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Test Summary</div><div className="text-xs font-medium text-slate-300">{t.testExecutionReport.summary}</div></div><div className="flex-1 bg-slate-800/50 p-3 rounded-xl border border-slate-800/50"><div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Metrics & Defects</div><div className="text-xs font-medium text-slate-300">{t.testExecutionReport.passFailMetrics}{t.testExecutionReport.defectSummary && <><br/><br/>{t.testExecutionReport.defectSummary}</>}</div></div></div>}
+                                        {t.testDesign && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-2">Coverage & Scenarios</h4><div className="text-[11px] text-slate-400 p-3 bg-slate-950 rounded-xl border border-slate-800/50 whitespace-pre-wrap"><strong>Coverage:</strong> {t.testDesign.testCoverage}<br/><br/><strong>Scenarios:</strong><br/><ul className="list-disc pl-4 space-y-1 mt-1">{(t.testDesign.testScenarios || []).map((s: string, k: number) => <li key={k}>{s}</li>)}</ul></div></div>}
+                                        {t.codeAudit && !t.testDesign && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-2">Code Quality Audit</h4><div className="text-[11px] text-slate-400 p-3 bg-slate-950 rounded-xl border border-slate-800/50 whitespace-pre-wrap">{t.codeAudit}</div></div>}
+                                        <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">Detailed Test Cases</h4>
+                                          <ul className="space-y-4">{(Array.isArray(t.testCases) ? t.testCases : []).map((tc: any, i: number) => (
+                                            <li key={i} className="flex items-start gap-4 text-[13px] text-slate-400 bg-slate-800/20 p-4 rounded-2xl border border-slate-800/50">
+                                              <div className={`w-5 h-5 rounded-full flex items-center justify-center mt-0.5 flex-shrink-0 ${tc.status === "passed" ? "bg-emerald-500/20 text-emerald-500" : tc.status === "failed" ? "bg-rose-500/20 text-rose-500" : "bg-amber-500/20 text-amber-500"}`}>
+                                                {tc.status === "passed" ? <CheckCircle2 className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
                                               </div>
-                                              <p className="font-medium text-slate-300 leading-relaxed mb-2">
-                                                {tc.description}
-                                              </p>
-                                              {tc.notes && (
-                                                <div className="p-3 bg-slate-950/50 rounded-xl text-[11px] text-slate-500 border border-slate-800/50">
-                                                  <strong>Observability Note:</strong> {tc.notes}
+                                              <div className="flex-1">
+                                                <div className="flex items-center gap-3 mb-2">
+                                                  <span className="font-mono font-bold text-slate-500 text-[10px]">ID: {tc.id || i + 1}</span>
+                                                  {tc.severity && <span className={`text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-widest ${tc.severity === 'Critical' ? 'bg-rose-500 text-white' : tc.severity === 'Major' ? 'bg-amber-500 text-white' : 'bg-slate-700 text-slate-400'}`}>{tc.severity}</span>}
+                                                  <span className={`ml-auto text-[10px] font-bold uppercase ${tc.status === 'passed' ? 'text-emerald-500' : tc.status === 'failed' ? 'text-rose-500' : 'text-amber-500'}`}>{tc.status}</span>
                                                 </div>
-                                              )}
-                                            </div>
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-
-                                    {project.tests.codeAudit && (
-                                      <div className="mt-4">
-                                        <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-2">
-                                          Code Quality Audit
-                                        </h4>
-                                        <div className="text-[11px] text-slate-400 p-3 bg-slate-950 rounded-xl border border-slate-800/50 whitespace-pre-wrap">
-                                          {project.tests.codeAudit}
+                                                <p className="font-black text-slate-200 leading-relaxed mb-2">{tc.description}</p>
+                                                {tc.steps && tc.steps.length > 0 && <div className="text-[11px] text-slate-400 mb-2"><strong>Steps:</strong><ol className="list-decimal pl-4 space-y-0.5 mt-1">{tc.steps.map((st: string, idx: number) => <li key={idx}>{st}</li>)}</ol></div>}
+                                                {(tc.expectedResult || tc.actualResult) && <div className="grid grid-cols-2 gap-2 mt-3"><div className="p-2 bg-slate-950/50 rounded flex flex-col gap-1 border border-slate-800/50"><span className="text-[9px] uppercase font-bold text-slate-500">Expected</span><span className="text-[11px] text-slate-300">{tc.expectedResult}</span></div><div className="p-2 bg-slate-950/50 rounded flex flex-col gap-1 border border-slate-800/50"><span className="text-[9px] uppercase font-bold text-slate-500">Actual</span><span className="text-[11px] text-slate-300">{tc.actualResult}</span></div></div>}
+                                                {tc.notes && !tc.expectedResult && <div className="p-3 bg-slate-950/50 rounded-xl text-[11px] text-slate-500 border border-slate-800/50"><strong>Note:</strong> {tc.notes}</div>}
+                                              </div>
+                                            </li>
+                                          ))}</ul>
                                         </div>
-                                      </div>
-                                    )}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    QA cycle pending...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">QA cycle pending...</p>}
                               </div>
                             )}
                           </section>
@@ -2470,141 +2783,179 @@ const App: React.FC = () => {
 
                         <div className="space-y-8">
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8 h-fit">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  arch: !prev.arch,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, arch: !prev.arch }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Architectural Design
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Architecture Diagrams</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.arch ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "arch")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.arch ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7"/></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.arch && (
                               <div className="mt-4">
                                 {project?.design ? (
                                   <div className="space-y-4">
-                                    {project.design.architectureDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-slate-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          System Architecture
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.architectureDiagram}
-                                          title="System Architecture"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.componentDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-cyan-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          HLD — Component Hierarchy
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.componentDiagram}
-                                          title="Component Hierarchy"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.erDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-emerald-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          ER Diagram — Data Entities
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.erDiagram}
-                                          title="ER Diagram"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.sequenceDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-amber-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          Sequence Diagram — User Flow
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.sequenceDiagram}
-                                          title="Sequence Diagram"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.lldDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-rose-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          LLD — Low Level Design
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.lldDiagram}
-                                          title="Low Level Design"
-                                        />
-                                      </div>
-                                    )}
-                                    <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 font-mono text-[10px] text-slate-500 leading-relaxed whitespace-pre-wrap italic">
-                                      {project.design.architecture ||
-                                        "Blueprint validated."}
-                                    </div>
+                                    {(() => {
+                                      const d = project.design as any;
+                                      const sysArch = d.hld?.systemArchitectureOverview || d.systemArchitectureOverview || d.architecture;
+                                      const archDiag = d.hld?.architectureDiagram || d.architectureDiagram;
+                                      const compDiag = d.hld?.componentDiagram || d.componentDiagram || d.componentStructure;
+                                      const erDiag = d.databaseDesign?.erDiagram || d.erDiagram;
+                                      const seqDiag = d.lld?.sequenceFlows || d.sequenceDiagram;
+                                      const lldDiag = d.lld?.classDiagram || d.lldDiagram;
+                                      
+                                      const hasContent = sysArch || archDiag || compDiag || erDiag || seqDiag || lldDiag;
+                                      
+                                      if (!hasContent) return <p className="text-xs text-slate-500 italic p-4 bg-slate-950/50 rounded-xl border border-slate-800/50">Detailed architecture diagrams are being drafted by the architect...</p>;
+
+                                      return (<>
+                                        {sysArch && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-400 leading-relaxed font-mono whitespace-pre-wrap"><span className="block font-bold text-slate-300 mb-2 uppercase tracking-tight font-sans">System Architecture Overview</span>{sysArch}</div>}
+                                        {archDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-slate-300 mb-2 uppercase tracking-tight font-sans text-[11px]">Architecture Diagram</span><MermaidDiagram chart={archDiag} title="System Architecture" /></div>}
+                                        {compDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-cyan-400 mb-3 uppercase tracking-tighter text-[11px]">HLD — Component Hierarchy</span><MermaidDiagram chart={compDiag} title="Component Hierarchy" /></div>}
+                                        {erDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-emerald-400 mb-3 uppercase tracking-tighter text-[11px]">ER Diagram — Data Entities</span><MermaidDiagram chart={erDiag} title="ER Diagram" /></div>}
+                                        {seqDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-amber-400 mb-3 uppercase tracking-tighter text-[11px]">Sequence Diagram — User Flow</span><MermaidDiagram chart={seqDiag} title="Sequence Diagram" /></div>}
+                                        {lldDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-rose-400 mb-3 uppercase tracking-tighter text-[11px]">LLD — Low Level Details</span><MermaidDiagram chart={lldDiag} title="Low Level Design" /></div>}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Architect is mapping system entities...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">Architect is mapping system entities...</p>}
                               </div>
                             )}
                           </section>
+
+                          {/* DATABASE SCHEMAS */}
+                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, dbSchema: !prev.dbSchema }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg bg-emerald-600/20 text-emerald-500 flex items-center justify-center">
+                                  <FileDigit className="w-4 h-4" />
+                                </div>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Database Schemas</h3>
+                              </div>
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "dbSchema")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.dbSchema ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7"/></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>}
+                              </div>
+                            </div>
+                            {expandedDocs.dbSchema && (
+                              <div className="mt-4">
+                                {project?.design ? (
+                                  <div className="space-y-6">
+                                    {(() => {
+                                      const d = project.design as any;
+                                      const dataModels = d.lld?.dataModels || d.dataModels || d.wireframes;
+                                      const tables = d.databaseDesign?.tables || d.tables || [];
+                                      
+                                      if (!dataModels && tables.length === 0) return <p className="text-xs text-slate-500 italic p-4 bg-slate-950/50 rounded-xl border border-slate-800/50">Database schema details are being finalized...</p>;
+
+                                      return (<>
+                                        {dataModels && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-emerald-400">Data Models</h4><div className="text-xs text-slate-400 whitespace-pre-wrap leading-relaxed bg-slate-800/20 p-4 rounded-xl border border-slate-800/50 font-mono">{dataModels}</div></div>}
+                                        {tables.length > 0 && (
+                                          <div>
+                                            <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-emerald-400">Database Tables</h4>
+                                            <div className="grid grid-cols-1 gap-4">
+                                              {tables.map((table: any, idx: number) => (
+                                                <div key={idx} className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed">
+                                                  <span className="block font-bold text-slate-300 mb-2 uppercase tracking-tighter">Table: {table.name}</span>
+                                                  {table.fields && <div className="mb-2"><strong className="text-slate-400">Fields:</strong><pre className="mt-1 text-[10px] font-mono text-slate-500 whitespace-pre-wrap">{table.fields}</pre></div>}
+                                                  {table.relationships && <div><strong className="text-slate-400">Relationships:</strong><pre className="mt-1 text-[10px] font-mono text-slate-500 whitespace-pre-wrap">{table.relationships}</pre></div>}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+                                      </>);
+                                    })()}
+                                  </div>
+                                ) : <p className="text-xs text-slate-600 italic">Database design pending...</p>}
+                              </div>
+                            )}
+                          </section>
+
+                          {/* REST API DOCUMENTS */}
+                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, apiDocs: !prev.apiDocs }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg bg-indigo-600/20 text-indigo-500 flex items-center justify-center">
+                                  <Globe className="w-4 h-4" />
+                                </div>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">REST API Documents</h3>
+                              </div>
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "apiDocs")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.apiDocs ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7"/></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>}
+                              </div>
+                            </div>
+                            {expandedDocs.apiDocs && (
+                              <div className="mt-4">
+                                {project?.design ? (
+                                  <div className="space-y-6">
+                                    {(() => {
+                                      const d = project.design as any;
+                                      const endpoints: any[] = d.lld?.apiEndpoints || d.apiEndpoints || d.apiContracts || [];
+                                      
+                                      if (endpoints.length === 0) return <p className="text-xs text-slate-500 italic p-4 bg-slate-950/50 rounded-xl border border-slate-800/50">API documentation is being generated...</p>;
+
+                                      return (<>
+                                        {endpoints.length > 0 ? (
+                                          <div>
+                                            <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-indigo-400">API Contracts</h4>
+                                            <div className="space-y-3">
+                                              {endpoints.map((ep: any, k: number) => (
+                                                <div key={k} className="text-[10px] font-mono bg-slate-950/50 p-4 rounded-2xl border border-slate-800/50">
+                                                  {typeof ep === 'string' ? <span className="text-indigo-400">{ep}</span> : (
+                                                    <div className="flex flex-col gap-3">
+                                                      <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-3">
+                                                          <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase ${
+                                                            ep.method === 'GET' ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' :
+                                                            ep.method === 'POST' ? 'bg-blue-500/10 text-blue-500 border border-blue-500/20' :
+                                                            ep.method === 'PUT' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' :
+                                                            'bg-rose-500/10 text-rose-500 border border-rose-500/20'
+                                                          }`}>{ep.method || 'GET'}</span>
+                                                          <span className="text-slate-200 font-bold">{ep.endpoint || '/'}</span>
+                                                        </div>
+                                                      </div>
+                                                      {(ep.request || ep.response) && (
+                                                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-1">
+                                                          {ep.request && (
+                                                            <div className="space-y-1.5">
+                                                              <span className="text-[8px] text-slate-500 uppercase font-black tracking-widest block">Request Schema</span>
+                                                              <pre className="text-[9px] text-indigo-300/70 bg-slate-900/50 p-3 rounded-xl border border-slate-800/50 whitespace-pre-wrap overflow-x-auto">
+                                                                {typeof ep.request === 'string' && (ep.request.trim().startsWith('{') || ep.request.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.request), null, 2); } catch { return ep.request; } })() : (typeof ep.request === 'object' ? JSON.stringify(ep.request, null, 2) : ep.request)}
+                                                              </pre>
+                                                            </div>
+                                                          )}
+                                                          {ep.response && (
+                                                            <div className="space-y-1.5">
+                                                              <span className="text-[8px] text-slate-500 uppercase font-black tracking-widest block">Response Schema</span>
+                                                              <pre className="text-[9px] text-emerald-300/70 bg-slate-900/50 p-3 rounded-xl border border-slate-800/50 whitespace-pre-wrap overflow-x-auto">
+                                                                {typeof ep.response === 'string' && (ep.response.trim().startsWith('{') || ep.response.trim().startsWith('[')) ? (() => { try { return JSON.stringify(JSON.parse(ep.response), null, 2); } catch { return ep.response; } })() : (typeof ep.response === 'object' ? JSON.stringify(ep.response, null, 2) : ep.response)}
+                                                              </pre>
+                                                            </div>
+                                                          )}
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        ) : <p className="text-xs text-slate-600 italic">No API endpoints defined.</p>}
+                                      </>);
+                                    })()}
+                                  </div>
+                                ) : <p className="text-xs text-slate-600 italic">API documentation pending...</p>}
+                              </div>
+                            )}
+                          </section>
+                          </div>
                         </div>
-                      </div>
                     </div>
                   )}
                 </div>

@@ -3,17 +3,18 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
-const DEFAULT_MODEL = 'gemini-3.1-pro-preview'; // Updated to match API key available models
+const DEFAULT_MODEL = 'gemini-1.5-flash'; // Optimized for speed and availability
 
 export class GeminiService {
   private ai: GoogleGenAI;
 
   constructor() {
-    if (!GEMINI_API_KEY) {
-      throw new Error('Gemini API key is missing. Please check your environment variables.');
+    // Initialize the SDK if a key is present, otherwise we'll rely on the proxy
+    if (GEMINI_API_KEY) {
+      this.ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    } else {
+      console.warn('Gemini API key is missing on frontend. Web app will rely solely on backend proxy.');
     }
-    // Initialize the SDK directly
-    this.ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
   }
 
   private async generate(contents: any, systemInstruction: string, schema?: any, modelOverride?: string, maxTokens?: number) {
@@ -45,9 +46,56 @@ export class GeminiService {
       const data = await response.json();
       return data.text;
 
-    } catch (error: any) {
-      console.error("Gemini Service Error:", error);
-      throw error;
+    } catch (proxyError: any) {
+      // If proxy is unreachable (backend not running), fall back to direct SDK
+      const errorMsg = proxyError?.message || String(proxyError);
+      const isNetworkError = errorMsg.includes('Failed to fetch') ||
+        errorMsg.includes('ERR_CONNECTION_REFUSED') ||
+        errorMsg.includes('NetworkError') ||
+        errorMsg.includes('Load failed') ||
+        errorMsg.includes('fetch');
+
+      if (!isNetworkError) {
+        // Proxy responded but with an error — don't retry with SDK
+        console.error("AI Proxy Error (non-network):", proxyError);
+        throw proxyError;
+      }
+
+      console.warn("AI Proxy unavailable, falling back to direct Gemini SDK...");
+
+      try {
+        if (!this.ai) {
+          throw new Error("AI Proxy unavailable and no direct SDK fallback configured (missing API key).");
+        }
+        const genModel = this.ai.getGenerativeModel({ 
+          model: modelName,
+          systemInstruction: systemInstruction 
+        });
+
+        const formattedContents = Array.isArray(contents)
+          ? contents
+          : [{ role: 'user', parts: [{ text: contents }] }];
+
+        const generationConfig: any = {
+          temperature: 0.1,
+          maxOutputTokens: maxTokens || 16384,
+        };
+        if (schema) {
+          generationConfig.responseMimeType = "application/json";
+          generationConfig.responseSchema = schema;
+        }
+
+        const result = await genModel.generateContent({
+          contents: formattedContents,
+          generationConfig,
+        });
+
+        const text = result.response.text();
+        return text;
+      } catch (sdkError: any) {
+        console.error("Direct Gemini SDK Error:", sdkError);
+        throw sdkError;
+      }
     }
   }
 
