@@ -1,8 +1,9 @@
 import * as webllm from '@mlc-ai/web-llm';
+import { IAgentService } from '../types';
 
 const ChatModule = (webllm as any).Chat || (webllm as any).ChatModule;
 
-export class LocalLLMService {
+export class LocalLLMService implements IAgentService {
   private chat: any;
   private initialized: boolean = false;
 
@@ -76,7 +77,7 @@ export class LocalLLMService {
     }
   }
 
-  async runRequirementAgent(prompt: string, attachments?: any[]) {
+  async runRequirementAgent(prompt: string, attachments?: any[], brdData?: any, figmaData?: any) {
     const sys = `You are a Senior Lead Business Analyst and Product Architect. Produce a detailed, comprehensive PRD.
     
     ### Guidelines:
@@ -86,7 +87,10 @@ export class LocalLLMService {
     
     Output strictly as JSON.`;
 
-    const response = await this.generate(prompt, sys);
+    const brdContext = brdData ? `\n\nBRD Data (Primary Source): ${JSON.stringify(brdData)}` : '';
+    const figmaContext = figmaData ? `\n\nFigma Design Context: ${JSON.stringify(figmaData)}` : '';
+    const fullPrompt = prompt + brdContext + figmaContext;
+    const response = await this.generate(fullPrompt, sys);
     try {
       const parsed = JSON.parse(response);
       return {
@@ -103,7 +107,7 @@ export class LocalLLMService {
     }
   }
 
-  async runDesignAgent(requirements: any, theme?: string, feedback?: string) {
+  async runDesignAgent(requirements: any, theme?: string, feedback?: string, figmaData?: any) {
     const sys = `You are a Principal Software Architect and Lead UI/UX Strategist.
     Translate requirements into a sophisticated, detailed technical design blueprint.
     ### Requirements:
@@ -113,7 +117,8 @@ export class LocalLLMService {
     
     Output strictly as JSON.`;
 
-    const prompt = `Requirements: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback for Refinement: ${feedback}` : ''}`;
+    const figmaContext = figmaData ? `\n\nFigma Design Context: ${JSON.stringify(figmaData)}` : '';
+    const prompt = `Requirements: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback for Refinement: ${feedback}` : ''}${figmaContext}`;
     const response = await this.generate(prompt, sys);
     try {
       const parsed = JSON.parse(response);
@@ -130,7 +135,7 @@ export class LocalLLMService {
     }
   }
 
-  async runDevelopmentAgent(design: any, requirements: any, prompt: string, theme?: string, feedback?: string) {
+  async runDevelopmentAgent(design: any, requirements: any, prompt: string, theme?: string, feedback?: string, existingCode?: string | Record<string, string>, figmaData?: any) {
     const sys = `You are an elite 10x Full-Stack Engineer. Build a "Production-Ready", 100% complete React application.
     ### CORE MANDATE:
     1. **Zero Placeholders**: Every feature in the design MUST be fully realized. No "TODO"s.
@@ -142,7 +147,13 @@ export class LocalLLMService {
     - Single monolithic file. Hardcode API: const API_BASE = 'http://localhost:3001';
     - Return ONLY raw code starting with imports. No markdown code blocks.`;
 
-    const context = `Requirements: ${JSON.stringify(requirements)}\n\nDesign: ${JSON.stringify(design)}${feedback ? `\n\nUser Feedback: ${feedback}` : ''}
+    const existingCodeStr = existingCode
+      ? (typeof existingCode === 'string' ? existingCode : Object.values(existingCode).join('\n\n'))
+      : null;
+    const figmaContext = figmaData ? `\n\nFigma Design Context: ${JSON.stringify(figmaData)}` : '';
+
+    const context = `Requirements: ${JSON.stringify(requirements)}\n\nDesign: ${JSON.stringify(design)}${feedback ? `\n\nUser Feedback: ${feedback}` : ''}${figmaContext}
+    ${existingCodeStr ? `\n\nExisting Code:\n${existingCodeStr}` : ''}
     ACTION: Synthesize the absolute complete Full-Stack code now. 
     Ensure the website is the MOST ACCURATE representation of the vision (${prompt}). 
     Every component must be fully realized with logic.`;
@@ -151,12 +162,13 @@ export class LocalLLMService {
     return response;
   }
 
-  async runTestingAgent(code: string | Record<string, string>, requirements: any, prompt: string, feedback?: string) {
+  async runTestingAgent(code: string | Record<string, string>, requirements: any, prompt: string, feedback?: string, figmaData?: any) {
     const sys = `You are a QA Engineer Agent. Review the code against requirements and generate test cases and a results report. 
     Output JSON with testCases (array), results (string), and bugReports (string).`;
 
     const codeContent = typeof code === 'string' ? code : JSON.stringify(code, null, 2);
-    const context = `Code: ${codeContent}\n\nRequirements: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback: ${feedback}` : ''}`;
+    const figmaContext = figmaData ? `\n\nFigma Design Context: ${JSON.stringify(figmaData)}` : '';
+    const context = `Code: ${codeContent}\n\nRequirements: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback: ${feedback}` : ''}${figmaContext}`;
     const response = await this.generate(context, sys);
 
     try {

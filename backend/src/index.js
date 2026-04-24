@@ -20,11 +20,13 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const aiRoutes = require('./routes/aiRoutes');
+const figmaRoutes = require('./routes/figmaRoutes');
 
 // Routes
 app.use('/auth', authRoutes);
 app.use('/api', projectRoutes);
 app.use('/ai', aiRoutes);
+app.use('/figma', figmaRoutes);
 app.use('/github', githubRoutes);
 
 // Health Check

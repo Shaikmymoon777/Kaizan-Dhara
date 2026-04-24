@@ -1,20 +1,32 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
+import { IAgentService } from "../types";
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
-const DEFAULT_MODEL = 'gemini-1.5-flash'; // Optimized for speed and availability
+const DEFAULT_MODEL = 'gemini-3.1-pro-preview'; // Updated to match API key available models
 
-export class GeminiService {
+// -----------------------------------------------------------------------------
+// Grounding & Relevance Constants
+// -----------------------------------------------------------------------------
+const HARD_GROUNDING_RULES = `
+### 🔒 HARD GROUNDING & RELEVANCE RULES (NON-NEGOTIABLE)
+1. ONLY use provided User Prompt, BRD data, and Attachments.
+2. STRICTLY FORBIDDEN: website suggestions, external URLs, generic external tools, or irrelevant platforms.
+3. If specific data is missing from input → return "Not specified in input". DO NOT HALLUCINATE.
+4. RELEVANCE CHECK: Every component/feature MUST directly support the user's core intent.
+5. NO GENERIC TEMPLATES: If the prompt is "Coffee Shop", do not include "Dating App" features.
+6. DOCUMENT PRIORITY: Attachments/BRD are the PRIMARY SOURCE. User prompt is supplementary context.
+`;
+
+export class GeminiService implements IAgentService {
   private ai: GoogleGenAI;
 
   constructor() {
-    // Initialize the SDK if a key is present, otherwise we'll rely on the proxy
-    if (GEMINI_API_KEY) {
-      this.ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-    } else {
-      console.warn('Gemini API key is missing on frontend. Web app will rely solely on backend proxy.');
+    if (!GEMINI_API_KEY) {
+      throw new Error('Gemini API key is missing. Please check your environment variables.');
     }
+    // Initialize the SDK directly
+    this.ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
   }
 
   private async generate(contents: any, systemInstruction: string, schema?: any, modelOverride?: string, maxTokens?: number) {
@@ -30,7 +42,7 @@ export class GeminiService {
           model: modelName,
           contents: Array.isArray(contents) ? contents : [{ role: 'user', parts: [{ text: contents }] }],
           config: {
-            systemInstruction,
+            systemInstruction: systemInstruction + '\n' + HARD_GROUNDING_RULES,
             temperature: 0.1,
             maxOutputTokens: maxTokens || 16384,
             ...(schema ? { responseMimeType: "application/json", responseSchema: schema } : {})
@@ -46,56 +58,9 @@ export class GeminiService {
       const data = await response.json();
       return data.text;
 
-    } catch (proxyError: any) {
-      // If proxy is unreachable (backend not running), fall back to direct SDK
-      const errorMsg = proxyError?.message || String(proxyError);
-      const isNetworkError = errorMsg.includes('Failed to fetch') ||
-        errorMsg.includes('ERR_CONNECTION_REFUSED') ||
-        errorMsg.includes('NetworkError') ||
-        errorMsg.includes('Load failed') ||
-        errorMsg.includes('fetch');
-
-      if (!isNetworkError) {
-        // Proxy responded but with an error — don't retry with SDK
-        console.error("AI Proxy Error (non-network):", proxyError);
-        throw proxyError;
-      }
-
-      console.warn("AI Proxy unavailable, falling back to direct Gemini SDK...");
-
-      try {
-        if (!this.ai) {
-          throw new Error("AI Proxy unavailable and no direct SDK fallback configured (missing API key).");
-        }
-        const genModel = this.ai.getGenerativeModel({ 
-          model: modelName,
-          systemInstruction: systemInstruction 
-        });
-
-        const formattedContents = Array.isArray(contents)
-          ? contents
-          : [{ role: 'user', parts: [{ text: contents }] }];
-
-        const generationConfig: any = {
-          temperature: 0.1,
-          maxOutputTokens: maxTokens || 16384,
-        };
-        if (schema) {
-          generationConfig.responseMimeType = "application/json";
-          generationConfig.responseSchema = schema;
-        }
-
-        const result = await genModel.generateContent({
-          contents: formattedContents,
-          generationConfig,
-        });
-
-        const text = result.response.text();
-        return text;
-      } catch (sdkError: any) {
-        console.error("Direct Gemini SDK Error:", sdkError);
-        throw sdkError;
-      }
+    } catch (error: any) {
+      console.error("Gemini Service Error:", error);
+      throw error;
     }
   }
 
@@ -131,7 +96,7 @@ export class GeminiService {
     throw lastError;
   }
 
-  async runRequirementAgent(prompt: string, attachments?: any[]) {
+  async runRequirementAgent(prompt: string, attachments?: any[], brdData?: any, figmaData?: any) {
     const sys = `You are a Senior Lead Business Analyst and Product Architect at a world-class technology consulting firm.
     Your goal is to produce a highly detailed, professional, and comprehensive Product Requirements Document (PRD).
 
@@ -170,7 +135,19 @@ export class GeminiService {
       required: ["projectTitle", "executiveSummary", "userStories", "scope", "technicalConstraints", "dataEntities"]
     };
 
-    const parts: any[] = [{ text: `User request: ${prompt}` }];
+    const parts: any[] = [{ text: `
+=== USER INPUT (STRICT SOURCE) ===
+${prompt || "Not specified in input"}
+=== END INPUT ===
+${brdData ? `
+=== BRD / STRUCTURED DOCUMENT (PRIMARY SOURCE OF TRUTH) ===
+${JSON.stringify(brdData, null, 2)}
+=== END BRD ===
+` : ''}${figmaData ? `
+=== FIGMA DESIGN CONTEXT ===
+${JSON.stringify(figmaData, null, 2)}
+=== END FIGMA ===
+` : ''}` }];
 
     if (attachments && attachments.length > 0) {
       attachments.forEach(att => {
@@ -183,7 +160,11 @@ export class GeminiService {
             }
           });
         } else {
-          parts.push({ text: `Attachment - ${att.name}: ${att.content}` });
+          parts.push({ text: `
+=== PRIMARY DOCUMENT (SOURCE OF TRUTH) - ${att.name} ===
+${att.content}
+=== END DOCUMENT ===
+` });
         }
       });
     }
@@ -193,7 +174,8 @@ export class GeminiService {
     return this.cleanAndParseJson(res || '{}');
   }
 
-  async runDesignAgent(requirements: any, theme?: string, feedback?: string) {
+  async runDesignAgent(requirements: any, theme?: string, feedback?: string, figmaData?: any) {
+    const focusedReqs = this.buildFocusedContext(requirements);
     const sys = `You are a Principal Software Architect and Lead UI/UX Strategist.
     Your task is to translate complex requirements into a sophisticated, detailed technical design blueprint.
     
@@ -202,56 +184,61 @@ export class GeminiService {
     2. **Component Hierarchy Diagram**: Provide a Mermaid.js graph (graph TD) showing the HLD — all major components, their nesting, and communication paths.
     3. **ER Diagram**: Provide a Mermaid.js erDiagram showing all data entities, their attributes, and relationships based on the requirements' dataEntities.
     4. **Sequence Diagram**: Provide a Mermaid.js sequenceDiagram illustrating the primary user flow through the application.
-    5. **Low Level Design (LLD) Diagram**: Provide a Mermaid.js classDiagram showing the internal low-level design — all classes, modules, services, and utility layers with their properties, methods, visibility modifiers, and inheritance or dependency relationships. This should cover frontend components (with props and state), backend services (with method signatures), data access layers, and helper utilities.
-    6. **UX Strategy & Exhaustive Wireframes**: Provide massive, extensive textual descriptions of the UI/UX journey. You MUST define wireframes for MULTIPLE distinct sections (Landing page, Content grids, Data dashboards, Modals, Footers). Do not skimp on details. 
+    5. **Low Level Design (LLD) Diagram**: Provide a Mermaid.js classDiagram showing the internal low-level design — all classes, modules, services, and utility layers with their properties, methods, visibility modifiers, and inheritance or dependency relationships.
+    6. **UX Strategy & Exhaustive Wireframes**: Provide massive, extensive textual descriptions of the UI/UX journey. You MUST define wireframes for MULTIPLE distinct sections. Do not skimp on details. 
     7. **API Ecosystem**: Formulate robust API contracts (methods, paths, request/response structures, error handling strategy).
     8. **Modular Architecture**: Detailed map of React components (you should define at least 10-15 distinct sub-components to ensure a robust build).
     9. **Premium Design Language**: Apply the '${theme || 'Modern Obsidian'}' theme with extreme precision. 
-       - Define a sophisticated design tokens library (colors, spacing, shadows, typography).
-       - **CRITICAL**: The design MUST be elite. Specify vibrant, harmonious color palettes, sophisticated typography (Inter/Outfit), sleek dark modes, glassmorphism effects, dynamic micro-animations, and fluid transitions. 
-       - The documentation must describe a "State-of-the-art" visual experience.
+       - Define a sophisticated design tokens library.
+       - **CRITICAL**: The design MUST be elite. Specify vibrant, harmonious color palettes, sophisticated typography, sleek dark modes, glassmorphism effects, dynamic micro-animations.
 
     ### CRITICAL MERMAID SYNTAX RULES (MUST FOLLOW):
     - NEVER use parentheses in subgraph names → "subgraph Frontend" NOT "subgraph Frontend (React)"
     - NEVER use slashes in node labels → "PostgreSQL or MongoDB" NOT "PostgreSQL/MongoDB"
     - NEVER redefine a node ID with a different label
     - Do NOT wrap diagrams in markdown code fences — output ONLY raw Mermaid syntax
-    - For erDiagram: use proper erDiagram syntax with entity names, attributes, and relationship lines
-    - For sequenceDiagram: use proper participant, arrows (->>, -->>), and notes
-    - For classDiagram (LLD): use proper classDiagram syntax with class definitions, attributes with types and visibility (+, -, #), methods with parameters and return types, and relationship arrows (<|-- for inheritance, *-- for composition, o-- for aggregation, --> for dependency)
 
     Output strictly as JSON.`;
 
     const schema = {
       type: Type.OBJECT,
       properties: {
-        architectureDiagram: { type: Type.STRING, description: "Comprehensive Mermaid.js graph TD definition showing full system architecture — components, services, databases, external APIs, and their connections. Raw Mermaid syntax only, no code fences." },
-        componentDiagram: { type: Type.STRING, description: "Mermaid.js graph TD showing HLD component hierarchy — all major UI components, their nesting within layout areas, and data flow between them. Raw Mermaid syntax only, no code fences." },
-        erDiagram: { type: Type.STRING, description: "Mermaid.js erDiagram showing all data entities derived from dataEntities in the requirements, with their attributes (types) and relationships (one-to-many, etc). Raw Mermaid syntax only, no code fences." },
-        sequenceDiagram: { type: Type.STRING, description: "Mermaid.js sequenceDiagram illustrating the primary user flow — from entry through key interactions to completion. Include participants, messages, and alt/opt blocks where relevant. Raw Mermaid syntax only, no code fences." },
-        lldDiagram: { type: Type.STRING, description: "Mermaid.js classDiagram showing the Low Level Design — all classes, modules, services, and utilities with their properties (with types), methods (with parameters and return types), visibility modifiers (+, -, #), and relationships (inheritance, composition, dependency). Cover frontend components, backend services, data access layers, and helpers. Raw Mermaid syntax only, no code fences." },
-        componentStructure: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Detailed component hierarchy and responsibility map" },
-        wireframes: { type: Type.STRING, description: "Extensive UX layout descriptions and interaction specs" },
-        apiEndpoints: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Formal API specifications including methods and data shapes" },
-        designSystem: { type: Type.STRING, description: "Comprehensive design tokens, color palette, and visual principles" }
+        architectureDiagram: { type: Type.STRING },
+        componentDiagram: { type: Type.STRING },
+        erDiagram: { type: Type.STRING },
+        sequenceDiagram: { type: Type.STRING },
+        lldDiagram: { type: Type.STRING },
+        componentStructure: { type: Type.ARRAY, items: { type: Type.STRING } },
+        wireframes: { type: Type.STRING },
+        apiEndpoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+        designSystem: { type: Type.STRING }
       },
       required: ["architectureDiagram", "componentDiagram", "erDiagram", "sequenceDiagram", "lldDiagram", "componentStructure", "wireframes", "apiEndpoints", "designSystem"]
     };
 
-    const prompt = `Requirements Artifact: ${JSON.stringify(requirements)}${feedback ? `\n\nUser Feedback for Refinement: ${feedback}` : ''}`;
-    const res = await this.generateWithRetry(prompt, sys, schema, DEFAULT_MODEL, 5, 20480);
+    const prompt = `
+=== PRIMARY DOCUMENT (SOURCE OF TRUTH) ===
+${JSON.stringify(focusedReqs)}
+=== END DOCUMENT ===
+
+${feedback ? `\n=== USER INPUT (STRICT SOURCE) ===\nRefinement: ${feedback}\n=== END INPUT ===` : ''}`;
+    
+    const figmaContext = figmaData ? `\n\nFigma Design Context: ${JSON.stringify(figmaData)}` : '';
+    const fullPrompt = `${prompt}${figmaContext}`;
+    const res = await this.generateWithRetry(fullPrompt, sys, schema, DEFAULT_MODEL, 5, 20480);
     return this.cleanAndParseJson(res || '{}');
   }
 
-  async runDevelopmentAgent(design: any, requirements: any, prompt: string, theme?: string, feedback?: string, existingCode?: string | Record<string, string>) {
+  async runDevelopmentAgent(design: any, requirements: any, prompt: string, theme?: string, feedback?: string, existingCode?: string | Record<string, string>, figmaData?: any) {
     const isModification = !!(feedback && existingCode);
+    const focusedReqs = this.buildFocusedContext(requirements);
 
     const sys = isModification
       ? `You are a 10x Full-Stack Engineer performing a TARGETED CODE MODIFICATION on a full-stack project.
 
     ### CRITICAL RULES FOR MODIFICATION:
     1. **Targeted Edits**: Only modify the files necessary to address the user's feedback.
-    2. **Multi-File Output**: Return a JSON object where keys are file paths (e.g., "frontend/App.tsx", "backend/server.js") and values are the raw complete file contents. Include ALL files that were changed. Do NOT include files that were not changed.
+    2. **Multi-File Output**: Return a JSON object where keys are file paths and values are the raw complete file contents. Include ALL files that were changed. Do NOT include files that were not changed.
     3. **Frontend Constraint**: Any changes to the React frontend MUST remain within the single monolithic 'frontend/App.tsx' file. Do not create new frontend files.
     4. **Design System**: Maintain the '${theme || 'Modern Obsidian'}' theme unless the feedback asks to change it.
 
@@ -260,25 +247,25 @@ export class GeminiService {
 
     ### CORE MANDATE (NO LAZINESS ALLOWED):
     1. **Zero Placeholders & No Stubs**: Every single feature, section, and component defined in the requirements and design MUST be fully implemented. "TODO" comments, "..." or empty sections are STRICTLY FORBIDDEN. You must write out the FULL, exhaustive code.
-    2. **Comprehensive Scope**: You MUST build a massive, multi-section, highly detailed website. Do NOT just output a shallow header, footer, and a simple dummy middle area. A proper site has immersive Hero sections, Feature grids, interactive dashboards, detailed data flows, forms, modals, or whatever is specified. Build them ALL. If you generate less than 800 lines of functional frontend code for a complex app, you have failed your mandate!
+    2. **Comprehensive Scope**: You MUST build a massive, multi-section, highly detailed website. Do NOT just output a shallow header, footer, and a simple dummy middle area. Immersive Hero sections, Feature grids, interactive dashboards, detailed data flows, forms, modals. Build them ALL. If you generate less than 800 lines of functional frontend code for a complex app, you have failed!
     3. **High Architectural Fidelity**: Synthesize code that is 100% accurate to the provided User Stories, accepted PRD, and Architectural Blueprints.
-    4. **Functional Completeness**: Implement real application logic (state management with Zustand, event handlers, form validations, robust data transformations) so the site actually works and feels "ready to ship".
+    4. **Functional Completeness**: Implement real application logic (state management with Zustand, event handlers, form validations) so the site actually works and feels "ready to ship".
     5. **Defensive Programming (CRITICAL)**: You MUST aggressively use optional chaining (\`?.map()\`) and fallback values (\`|| []\`) when mapping over arrays or accessing nested object properties. Data may be undefined on initial render. Never assume an array exists before mapping over it.
 
     ### CRITICAL ARCHITECTURE RULES:
     4. **Full-Stack JSON Map**: Generate both backend and frontend. Output a JSON object mapping file paths to string contents.
-    5. **Backend Structure**: Create a standard Node.js Express backend (e.g., "backend/server.js", "backend/routes/api.js", "backend/package.json").
+    5. **Backend Structure**: Create a standard Node.js Express backend.
     6. **CRITICAL FRONTEND RULE**: The ENTIRE React frontend application MUST be written into a single monolithic file at "frontend/App.tsx". 
        - Define all sub-components, hooks, and styles inside this file.
-       - Use a sophisticated SPA (Single Page App) architecture with internal state-based navigation or routing to handle all pages/views defined in the design.
+       - Use a sophisticated SPA (Single Page App) architecture with internal state-based navigation or routing.
        - The 'export default function App()' must be at the very bottom.
     7. **Modern Tech Stack**: Use 'lucide-react' for icons, 'framer-motion' for elite animations, 'tailwind-merge' and 'clsx' for styling.
 
     ### PREMIUM UI/UX DIRECTIVES (MANDATORY):
-    8. **Awwwards-Level Visual Excellence**: The design MUST be visually stunning, highly modern, and absolutely premium. Avoid boring, basic, flat centered layouts. Use complex CSS grids (e.g., asymmetrical Bento box layouts), overlapping elements, sophisticated typography scales, and rich micro-interactions.
-    9. **Rich Media & Imagery**: NEVER use solid colored placeholder boxes. You MUST integrate gorgeous placeholder images utilizing \`https://images.unsplash.com/photo-[ID]?auto=format&fit=crop&q=80\` to make the UI look realistic, immersive, and premium.
-    10. **Aesthetic Depth**: Heavily use advanced CSS properties (dense backdrop-blurs, glassmorphism layers, glowing decorative background orbs, deep layered shadows, subtle dot/grid textures, moving background gradients).
-    11. **Motion & Interaction**: Implement complex \`framer-motion\` animations (staggered list reveals, scroll-linked fade-ups, layout transitions, hover/tap button scales). Every interaction must feel "alive".
+    8. **Awwwards-Level Visual Excellence**: The design MUST be visually stunning, highly modern, and absolutely premium. Avoid boring, basic, flat centered layouts. Use complex CSS grids, sophisticated typography scales, rich micro-interactions.
+    9. **Rich Media & Imagery**: NEVER use solid colored placeholder boxes. You MUST integrate gorgeous placeholder images utilizing \`https://images.unsplash.com/photo-[ID]?auto=format&fit=crop&q=80\`.
+    10. **Aesthetic Depth**: Heavily use advanced CSS properties (dense backdrop-blurs, glassmorphism layers, glowing decorative background orbs, deep layered shadows).
+    11. **Motion & Interaction**: Implement complex \`framer-motion\` animations (staggered list reveals, scroll-linked fade-ups, layout transitions).
 
     ### ABSOLUTE CONSTRAINTS:
     11. **NEVER use import.meta.env or process.env in frontend code**. Hardcode the API base URL: \`const API_BASE = 'http://localhost:3001';\`.
@@ -294,38 +281,54 @@ export class GeminiService {
       : null;
 
     const actionPrompt = isModification
-      ? `USER MODIFICATION REQUEST: "${feedback}"
+      ? `
+GOAL: Perform a targeted code modification.
 
-EXISTING CODE TO MODIFY (return the complete modified version):
+=== USER INPUT (STRICT SOURCE) ===
+${feedback || "Not specified in input"}
+=== END INPUT ===
+
+=== EXISTING CODE TO MODIFY ===
 \`\`\`tsx
 ${existingCodeStr}
 \`\`\`
+=== END EXISTING CODE ===
 
 CONTEXT:
-- Original Requirements: ${JSON.stringify(requirements)}
+- Original Requirements: ${JSON.stringify(focusedReqs)}
 - Original Vision: ${prompt}
 
 INSTRUCTION: Apply ONLY the changes described in the modification request above. Return the full, complete modified file.`
-      : `CONTEXT:
-      - Requirements: ${JSON.stringify(requirements)}
-      - detailed Design: ${JSON.stringify(design)}
-      - User Vision: ${prompt}
-      ${feedback ? `- User Feedback: ${feedback}` : ''}
-      
-      ACTION:
-      Synthesize the absolute complete, high-performance Full-Stack code now. 
-      Every section, functional component, state management logic, design layout, and interactive element defined in the requirements and design MUST be present. YOU MUST WRITE THOUSANDS OF LINES if required. 
-      DO NOT skip sections. DO NOT output partial code. DO NOT just make a header and footer.
-      Ensure the generated application is an EXHAUSTIVE, MASSIVE, MOST ACCURATE representation of the original user vision (${prompt}).
-      Render every component with full logic. Ready for instant production-grade deployment!`;
+      : `
+GOAL: Generate a world-class ${requirements.projectTitle || 'application'} grounded in the provided context.
+
+=== USER INPUT (STRICT SOURCE) ===
+${prompt || "Not specified in input"}
+${feedback ? `\nFeedback: ${feedback}` : ''}
+${figmaData ? `\nFigma Design Context: ${JSON.stringify(figmaData)}` : ''}
+=== END INPUT ===
+
+=== PRIMARY DOCUMENT (SOURCE OF TRUTH) ===
+${JSON.stringify(focusedReqs)}
+=== END DOCUMENT ===
+
+=== DESIGN SPEC (SOURCE OF TRUTH) ===
+${JSON.stringify(design)}
+=== END DESIGN ===
+
+ACTION: Synthesize the absolute complete, high-performance Full-Stack code now. 
+Every section, functional component, state management logic, design layout, and interactive element defined in the requirements and design MUST be present. YOU MUST WRITE THOUSANDS OF LINES if required. 
+DO NOT skip sections. DO NOT output partial code. DO NOT just make a header and footer.
+Ensure the generated application is an EXHAUSTIVE, MASSIVE, MOST ACCURATE representation of the original user vision.
+Render every component with full logic. Ready for instant production-grade deployment!`;
 
     const responseText = await this.generateWithRetry(
       actionPrompt,
       sys,
-      undefined, // Removed strict schema constraint to prevent gemini empty object hallucination
+      undefined, 
       DEFAULT_MODEL,
       5,
-      60000 // Increased limit for full-stack gen
+      60000 
     );
 
     if (isModification && existingCode && typeof existingCode !== 'string') {
@@ -336,7 +339,8 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
     return this.cleanAndParseJson(responseText || '{}');
   }
 
-  async runTestingAgent(code: string | Record<string, string>, requirements: any, prompt: string, feedback?: string) {
+  async runTestingAgent(code: string | Record<string, string>, requirements: any, prompt: string, feedback?: string, figmaData?: any) {
+    const focusedReqs = this.buildFocusedContext(requirements);
     const sys = `You are a Senior Lead QA Automation Engineer and Security Auditor. 
     Your mission is to perform an exhaustive verification of the application against the requirements and enterprise-grade quality standards.
     
@@ -351,7 +355,7 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
     const schema = {
       type: Type.OBJECT,
       properties: {
-        executiveSummary: { type: Type.STRING, description: "Detailed quality assessment and risk profile." },
+        executiveSummary: { type: Type.STRING },
         testCases: {
           type: Type.ARRAY,
           items: {
@@ -361,24 +365,35 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
               description: { type: Type.STRING },
               status: { type: Type.STRING, enum: ["passed", "failed", "pending"] },
               severity: { type: Type.STRING, enum: ["Critical", "Major", "Minor", "None"] },
-              notes: { type: Type.STRING, description: "Detailed observation or failure context." }
+              notes: { type: Type.STRING }
             }
           }
         },
-        codeAudit: { type: Type.STRING, description: "Deep dive review of code architecture, security, and maintainability." },
-        identifiedIssues: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Detailed list of bugs or technical debt items." }
+        codeAudit: { type: Type.STRING },
+        identifiedIssues: { type: Type.ARRAY, items: { type: Type.STRING } }
       },
       required: ["executiveSummary", "testCases", "codeAudit", "identifiedIssues"]
     };
 
     const codeContent = typeof code === 'string' ? code : JSON.stringify(code, null, 2);
 
-    const res = await this.generateWithRetry(
-      `Analyzed Code: ${codeContent.substring(0, 50000)}... (truncated if too long)
-      Original Requirements: ${JSON.stringify(requirements)} 
-      User Focus: ${prompt}
-      ${feedback ? `User Feedback: ${feedback}` : ''}`,
-      sys, schema, DEFAULT_MODEL, 3, 8192);
+    const figmaContext = figmaData ? `\n\nFigma Design Context: ${JSON.stringify(figmaData)}` : '';
+    const promptText = `
+=== USER INPUT (STRICT SOURCE) ===
+${prompt || "Not specified in input"}
+${feedback ? `\nFeedback: ${feedback}` : ''}${figmaContext}
+=== END INPUT ===
+
+=== PRIMARY DOCUMENT (SOURCE OF TRUTH) ===
+${JSON.stringify(focusedReqs)}
+=== END DOCUMENT ===
+
+=== GENERATED CODE ===
+${codeContent.substring(0, 50000)}... (truncated if too long)
+=== END CODE ===
+`;
+
+    const res = await this.generateWithRetry(promptText, sys, schema, DEFAULT_MODEL, 3, 8192);
     return this.cleanAndParseJson(res || '{}');
   }
 
@@ -386,10 +401,6 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
   // PARALLEL VALIDATION PACK (runs concurrently with main agents)
   // ============================================================
 
-  /**
-   * Track 2A: Validates requirements against best practices.
-   * Fires concurrently while the main Design Agent runs.
-   */
   async runParallelReqValidation(requirements: any) {
     const sys = `You are a Senior Business Analyst performing a rapid requirements audit.
     Review the provided PRD for: completeness, ambiguity, feasibility gaps, and missing non-functional requirements.
@@ -398,10 +409,10 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
     const schema = {
       type: Type.OBJECT,
       properties: {
-        score: { type: Type.NUMBER, description: "Quality score 0-100" },
+        score: { type: Type.NUMBER },
         strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
-        gaps: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Missing or ambiguous areas" },
-        recommendation: { type: Type.STRING, description: "One sentence summary" }
+        gaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+        recommendation: { type: Type.STRING }
       },
       required: ["score", "strengths", "gaps", "recommendation"]
     };
@@ -413,19 +424,15 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
     return this.cleanAndParseJson(res || '{}');
   }
 
-  /**
-   * Track 2B: Reviews design artifacts for architectural soundness.
-   * Fires concurrently while the main Development Agent runs.
-   */
   async runParallelDesignReview(design: any, requirements: any) {
     const sys = `You are a Principal Architect performing a rapid design peer review.
-    Evaluate the design artifact against the requirements for: architectural soundness, API coverage, component cohesion, and technical risk.
+    Evaluate the design artifact against the requirements.
     Be concise. Respond strictly as JSON.`;
 
     const schema = {
       type: Type.OBJECT,
       properties: {
-        score: { type: Type.NUMBER, description: "Quality score 0-100" },
+        score: { type: Type.NUMBER },
         architectureRisks: { type: Type.ARRAY, items: { type: Type.STRING } },
         recommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
         summary: { type: Type.STRING }
@@ -440,22 +447,18 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
     return this.cleanAndParseJson(res || '{}');
   }
 
-  /**
-   * Track 2C: Static code analysis for quality & security.
-   * Fires concurrently while the main Testing Agent runs.
-   */
   async runParallelCodeTesting(code: string | Record<string, string>, requirements: any) {
     const sys = `You are a senior code reviewer performing static analysis.
-    Check for: code quality, security vulnerabilities, accessibility gaps, performance anti-patterns, and requirement coverage.
+    Check for code quality, security vulnerabilities, accessibility.
     Be concise. Respond strictly as JSON.`;
 
     const schema = {
       type: Type.OBJECT,
       properties: {
-        score: { type: Type.NUMBER, description: "Overall code quality score 0-100" },
+        score: { type: Type.NUMBER },
         issuesFound: { type: Type.ARRAY, items: { type: Type.STRING } },
         securityFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
-        a11yGaps: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Accessibility issues" },
+        a11yGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
         summary: { type: Type.STRING }
       },
       required: ["score", "issuesFound", "securityFlags", "a11yGaps", "summary"]
@@ -467,6 +470,16 @@ INSTRUCTION: Apply ONLY the changes described in the modification request above.
       sys, schema, DEFAULT_MODEL, 2, 4096
     );
     return this.cleanAndParseJson(res || '{}');
+  }
+
+  private buildFocusedContext(requirements: any) {
+    if (!requirements) return {};
+    return {
+      projectTitle: requirements.projectTitle,
+      executiveSummary: requirements.executiveSummary,
+      keyUserStories: (requirements.userStories || []).slice(0, 20),
+      keyEntities: (requirements.dataEntities || []).slice(0, 15)
+    };
   }
 
   private cleanAndParseJson(text: string): any {

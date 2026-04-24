@@ -11,14 +11,17 @@ import {
   Box,
   FileText,
   FileDigit,
+  Download,
 } from "lucide-react";
 import { GeminiService } from "./services/geminiService";
 import { LocalLLMService } from "./services/localLLMService";
 
-import { AgentMessage, SDLCProject } from "./types";
+import { type AgentMessage, SDLCProject, IAgentService } from "./types";
+import { FigmaService, type FigmaSchema } from "./services/figmaService";
 import AgentCard from "./components/AgentCard";
 import ChatSidebar from "./components/ChatSidebar";
 import HistorySidebar from "./components/HistorySidebar";
+import UserStoriesLibrary from "./components/UserStoriesLibrary";
 
 import LivePreview from "./components/LivePreview";
 import HomePage from "./components/HomePage";
@@ -30,6 +33,7 @@ import ToastNotification, { useToasts, type Toast } from "./components/ToastNoti
 
 import { storage } from "./utils/storage";
 import mermaid from "mermaid";
+import { parseDocument, mergeDocuments, type BRDStructuredData } from "./services/brdParserService";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_CONTEXT_LENGTH = 8000;
@@ -227,6 +231,7 @@ const App: React.FC = () => {
   const [expandedDocs, setExpandedDocs] = useState({
     req: true,
     design: true,
+    devdocs: true,
     test: true,
     arch: true,
   });
@@ -247,11 +252,17 @@ const App: React.FC = () => {
   const [selectedTestCase, setSelectedTestCase] = useState<string | null>(null);
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [figmaLink, setFigmaLink] = useState("");
+  const [figmaData, setFigmaData] = useState<FigmaSchema | null>(null);
+  const [isFetchingFigma, setIsFetchingFigma] = useState(false);
   const { toasts, addToast, removeToast } = useToasts();
+
+  // BRD parsing state
+  const [brdData, setBrdData] = useState<BRDStructuredData | null>(null);
+  const [showBRDPreview, setShowBRDPreview] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const agentService = useRef<LocalLLMService | GeminiService | null>(null);
+  const agentService = useRef<IAgentService | null>(null);
 
   // Check for API key and initialize appropriate service
   useEffect(() => {
@@ -343,6 +354,57 @@ const App: React.FC = () => {
     scrollToBottom();
   }, [messages]);
 
+  // Parse BRD/LLD/HLD documents whenever the file list changes
+  useEffect(() => {
+    const docFiles = processedFiles.filter(
+      f => f.status === 'done' && f.category === 'document' && f.content.trim().length > 0
+    );
+
+    if (docFiles.length === 0) {
+      setBrdData(null);
+      return;
+    }
+
+    const parsed = docFiles.map(f => parseDocument(f.content, f.name));
+    const merged = parsed.length > 1 ? mergeDocuments(parsed) : parsed[0];
+    setBrdData(merged);
+
+    if (merged.isValid) {
+      addToast({
+        type: 'info',
+        title: `${merged.documentType} Document Parsed`,
+        message: `Extracted ${merged.functional_requirements.length} functional requirements, ${merged.user_flows.length} user flows from "${docFiles.map(f => f.name).join(', ')}".`,
+        duration: 6000,
+      });
+    }
+  }, [processedFiles]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleFetchFigma = async () => {
+    if (!figmaLink) return;
+    setIsFetchingFigma(true);
+    try {
+      addMessage("Orchestrator", `Connecting to Figma API to extract design tokens and hierarchy for "${figmaLink}"...`, "thinking");
+      const data = await FigmaService.fetchFile(figmaLink);
+      setFigmaData(data);
+      addMessage("Orchestrator", `Successfully extracted ${data.pages.length} pages and design theme from Figma: "${data.name}"`);
+      addToast({
+        type: 'info',
+        title: 'Figma Design Linked',
+        message: `Extracted ${data.pages.length} pages and design tokens.`,
+        duration: 5000,
+      });
+    } catch (err: any) {
+      addMessage("Orchestrator", `Figma Error: ${err.message}`, "error");
+      addToast({
+        type: 'error',
+        title: 'Figma Error',
+        message: err.message,
+      });
+    } finally {
+      setIsFetchingFigma(false);
+    }
+  };
+
   // Helper function to add delays between API calls
   const delay = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
@@ -361,6 +423,8 @@ const App: React.FC = () => {
     setProcessedFiles([]);
     setSelectedTestCase(null);
     setFigmaLink("");
+    setBrdData(null);
+    setShowBRDPreview(false);
     setDeliverableSubTab("preview");
     setActiveTab("flow");
   };
@@ -457,7 +521,7 @@ const App: React.FC = () => {
       if (project.requirements) {
         body += `<h2>1. Requirement Specification (PRD)</h2>`;
         body += `<div class="executive-summary"><strong>Executive Vision:</strong><br/>${project.requirements.executiveSummary || ""}</div>`;
-        
+
         body += `<h3>User Stories & Business Value</h3>`;
         body += `<table><tr><th width="10%">ID</th><th width="30%">Story</th><th width="35%">Detailed Description</th><th width="15%">Priority</th></tr>`;
         (project.requirements.userStories || []).forEach((s: any) => {
@@ -473,8 +537,10 @@ const App: React.FC = () => {
         });
         body += `</table>`;
 
-        body += `<h3>Strategic Scope Boundaries</h3><p>${project.requirements.scope || ""}</p>`;
-        
+        const scopeVal = project.requirements.scope;
+        const scopeText = typeof scopeVal === 'string' ? scopeVal : scopeVal ? JSON.stringify(scopeVal) : "";
+        body += `<h3>Strategic Scope Boundaries</h3><p>${scopeText}</p>`;
+
         body += `<h3>Technical & Security Constraints</h3><ul>`;
         (project.requirements.technicalConstraints || []).forEach((tc: string) => body += `<li>${tc}</li>`);
         body += `</ul>`;
@@ -492,7 +558,7 @@ const App: React.FC = () => {
         (project.design.componentStructure || []).forEach((c: string) => body += `<li>${c}</li>`);
         body += `</ul>`;
         body += `<h3>UX Wireframe & Interaction Specs</h3><div style="background: #f8fafc; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px; font-family: 'Consolas', monospace; font-size: 9pt; color: #334155; white-space: pre-wrap;">${project.design.wireframes || ""}</div>`;
-        
+
         body += `<h3>API Ecosystem Contracts</h3><table><tr><th>Planned Interface Definitions</th></tr>`;
         (project.design.apiEndpoints || []).forEach((ae: string) => body += `<tr><td><code>${ae}</code></td></tr>`);
         body += `</table>`;
@@ -502,7 +568,7 @@ const App: React.FC = () => {
         body += `<br clear=all style='mso-break-type:section-break'>`;
         body += `<h2>3. Quality Assurance & Verification</h2>`;
         body += `<div class="executive-summary">${project.tests.executiveSummary || ""}</div>`;
-        
+
         body += `<h3>Traceability Matrix & Test Results</h3>`;
         body += `<table><tr><th>ID</th><th>Verification Scenario</th><th>Severity</th><th>Status</th><th>Notes</th></tr>`;
         (project.tests.testCases || []).forEach((tc: any) => {
@@ -524,13 +590,95 @@ const App: React.FC = () => {
       const blob = new Blob(['\ufeff', header + body], {
         type: 'application/msword'
       });
-      
+
       saveAs(blob, `${project.name.replace(/\s+/g, "_").toLowerCase()}_report.doc`);
-      
+
       addMessage("Orchestrator", "Professional-grade MS Word project documentation successfully exported.");
     } catch (error) {
       console.error("Word export error:", error);
       addMessage("Orchestrator", "Failed to generate Word documentation. Interface export interrupted.", "error");
+    }
+  };
+
+  const downloadSectionAsMd = async (e: React.MouseEvent, section: "req" | "design" | "devdocs" | "test" | "arch") => {
+    e.stopPropagation();
+    if (!project) return;
+    try {
+      const { saveAs } = await import("file-saver");
+      let content = "";
+      let filename = "";
+      const r = project.requirements as any;
+      const d = project.design as any;
+      const t = project.tests as any;
+
+      if (section === "req" && r) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_requirements.md`;
+        content += `# ${project.name} - Requirements\n\n`;
+        if (r.projectOverview || r.executiveSummary) content += `## Overview\n${r.projectOverview || r.executiveSummary}\n\n`;
+        if (r.businessObjectives) content += `## Business Objectives\n${r.businessObjectives}\n\n`;
+        const scopeObj = typeof r.scope === 'object' && r.scope !== null ? r.scope : null;
+        if (scopeObj) {
+          content += `## Scope\n### In Scope\n${(scopeObj.inScope || []).map((s: string) => `- ${s}`).join('\n')}\n### Out Of Scope\n${(scopeObj.outOfScope || []).map((s: string) => `- ${s}`).join('\n')}\n\n`;
+        } else if (r.scope) {
+          content += `## Scope\n${r.scope}\n\n`;
+        }
+        content += `## User Stories\n`;
+        (r.userStories || []).forEach((s: any) => {
+          content += `### #${s.id} ${s.story}\n`;
+          (s.acceptanceCriteria || []).forEach((ac: string) => content += `- ${ac}\n`);
+          content += `\n`;
+        });
+      } else if (section === "design" && d) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_design.md`;
+        const stack = d.hld?.technologyStackOverview || d.designSystem || "";
+        const integrations = (d.hld?.externalIntegrations || []).join(', ');
+        if (stack) content += `## Tech Stack\n${stack}\n\nIntegrations: ${integrations}\n\n`;
+        const dataModels = d.lld?.dataModels || d.wireframes || "";
+        if (dataModels) content += `## Data Models\n\`\`\`\n${dataModels}\n\`\`\`\n\n`;
+        const endpoints = d.lld?.apiEndpoints || d.apiEndpoints || [];
+        if (endpoints.length) {
+          content += `## API Endpoints\n`;
+          endpoints.forEach((ep: any) => {
+            if (typeof ep === 'string') content += `- ${ep}\n`;
+            else content += `- **${ep.method}**: \`${ep.endpoint}\`\n`;
+          });
+        }
+      } else if (section === "devdocs" && project.devDocs) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_devdocs.md`;
+        const dd = project.devDocs;
+        content += `# Development Documentation\n\n`;
+        if (dd.techStack) content += `## Tech Stack\n${dd.techStack}\n\n`;
+        if (dd.projectStructure) content += `## Structure\n\`\`\`\n${dd.projectStructure}\n\`\`\`\n\n`;
+        if (dd.setupInstructions) content += `## Setup Instructions\n${dd.setupInstructions}\n\n`;
+        if (dd.environmentVariables) content += `## Env Variables\n${dd.environmentVariables}\n\n`;
+        if (dd.deploymentOverview) content += `## Deployment\n${dd.deploymentOverview}\n\n`;
+      } else if (section === "test" && t) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_verification.md`;
+        if (t.testPlan) content += `## Test Plan\n**Scope:** ${t.testPlan.testingScope}\n**Strategy:** ${t.testPlan.testingStrategy}\n\n`;
+        if (t.testExecutionReport) content += `## Execution Report\n${t.testExecutionReport.summary}\n\n`;
+        if (t.executiveSummary) content += `## Summary\n${t.executiveSummary}\n\n`;
+        content += `## Test Cases\n`;
+        (t.testCases || []).forEach((tc: any) => {
+          content += `### [${tc.status?.toUpperCase() || "PENDING"}] ${tc.id}\n${tc.description}\n`;
+          if (tc.expectedResult) content += `Expected: ${tc.expectedResult}\nActual: ${tc.actualResult}\n`;
+          content += `\n`;
+        });
+      } else if (section === "arch" && d) {
+        filename = `${project.name.replace(/\s+/g, "_").toLowerCase()}_architecture.md`;
+        const compDiag = d.hld?.componentDiagram || d.componentDiagram;
+        const erDiag = d.databaseDesign?.erDiagram || d.erDiagram;
+        const seqDiag = d.lld?.sequenceFlows || d.sequenceDiagram;
+        if (compDiag) content += `## Component Diagram\n\`\`\`mermaid\n${compDiag}\n\`\`\`\n\n`;
+        if (erDiag) content += `## ER Diagram\n\`\`\`mermaid\n${erDiag}\n\`\`\`\n\n`;
+        if (seqDiag) content += `## Sequence Diagram\n\`\`\`mermaid\n${seqDiag}\n\`\`\`\n\n`;
+      }
+
+      if (!content) { addMessage("Orchestrator", "Artifact content is empty.", "error"); return; }
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      saveAs(blob, filename);
+      addMessage("Orchestrator", `Downloaded ${filename}`);
+    } catch (error) {
+      addMessage("Orchestrator", "Failed to download artifact.", "error");
     }
   };
 
@@ -563,6 +711,7 @@ const App: React.FC = () => {
     customPrompt: string,
     isRemodify = false,
     fileAttachments?: any[],
+    activeBrdData?: BRDStructuredData | null,
   ) => {
     if (!agentService.current) return;
 
@@ -571,12 +720,20 @@ const App: React.FC = () => {
       p ? { ...p, isProcessing: true, waitingForApproval: false } : null,
     );
 
+    const effectiveBrdData = activeBrdData !== undefined ? activeBrdData : brdData;
+
     try {
       if (isRemodify) {
         if (!project) return;
         addMessage(
           "Requirement",
           `Refining requirements with feedback: "${customPrompt}"...`,
+          "thinking",
+        );
+      } else if (effectiveBrdData?.isValid) {
+        addMessage(
+          "Requirement",
+          `BRD Document Mode — Extracting requirements from "${effectiveBrdData.sourceFiles.join(', ')}" (${effectiveBrdData.functional_requirements.length} FRs, ${effectiveBrdData.user_flows.length} user flows). No hallucination mode active.`,
           "thinking",
         );
       } else {
@@ -592,6 +749,8 @@ const App: React.FC = () => {
       const reqs = await agentService.current.runRequirementAgent(
         customPrompt,
         effectiveAttachments,
+        effectiveBrdData,
+        figmaData,
       );
 
       setProject((p) => {
@@ -648,20 +807,20 @@ const App: React.FC = () => {
       // Fire main agent + parallel validator concurrently
       const reqSnapshot = project.requirements;
       const [design, reqValidation] = await Promise.all([
-        agentService.current.runDesignAgent(reqSnapshot, selectedTheme, feedback),
+        agentService.current.runDesignAgent(reqSnapshot, selectedTheme, feedback, figmaData),
         agentService.current.runParallelReqValidation(reqSnapshot).catch(() => null),
       ]);
 
       setProject((p) =>
         p
           ? {
-              ...p,
-              design,
-              reqValidation: reqValidation ?? p.reqValidation,
-              currentStep: 2,
-              isProcessing: false,
-              waitingForApproval: true,
-            }
+            ...p,
+            design,
+            reqValidation: reqValidation ?? p.reqValidation,
+            currentStep: 2,
+            isProcessing: false,
+            waitingForApproval: true,
+          }
           : null,
       );
       addMessage(
@@ -715,27 +874,29 @@ const App: React.FC = () => {
         "thinking",
       );
 
-      const existingCode = isRemodify ? project.code || undefined : undefined;
-      const [design, requirements] = [project.design, project.requirements];
-
-      // Fire main agent + parallel design reviewer concurrently
       const [code, designReview] = await Promise.all([
         agentService.current.runDevelopmentAgent(
-          design, requirements, project.prompt, selectedTheme, feedback, existingCode,
+          project.design,
+          project.requirements,
+          project.prompt,
+          selectedTheme,
+          feedback,
+          project.code || undefined,
+          figmaData
         ),
-        agentService.current.runParallelDesignReview(design, requirements).catch(() => null),
+        agentService.current.runParallelDesignReview(project.design, project.requirements).catch(() => null),
       ]);
 
       setProject((p) =>
         p
           ? {
-              ...p,
-              code,
-              designReview: designReview ?? p.designReview,
-              currentStep: 3,
-              isProcessing: false,
-              waitingForApproval: true,
-            }
+            ...p,
+            code,
+            designReview: designReview ?? p.designReview,
+            currentStep: 3,
+            isProcessing: false,
+            waitingForApproval: true,
+          }
           : null,
       );
       addMessage(
@@ -790,20 +951,20 @@ const App: React.FC = () => {
       // Fire main QA agent + parallel code analyser concurrently
       const [code, requirements] = [project.code, project.requirements];
       const [tests, codeAnalysis] = await Promise.all([
-        agentService.current.runTestingAgent(code, requirements, project.prompt, feedback),
+        agentService.current.runTestingAgent(code, requirements, project.prompt, feedback, figmaData),
         agentService.current.runParallelCodeTesting(code, requirements).catch(() => null),
       ]);
 
       setProject((p) =>
         p
           ? {
-              ...p,
-              tests,
-              codeAnalysis: codeAnalysis ?? p.codeAnalysis,
-              currentStep: 4,
-              isProcessing: false,
-              waitingForApproval: true,
-            }
+            ...p,
+            tests,
+            codeAnalysis: codeAnalysis ?? p.codeAnalysis,
+            currentStep: 4,
+            isProcessing: false,
+            waitingForApproval: true,
+          }
           : null,
       );
       addMessage(
@@ -898,24 +1059,42 @@ const App: React.FC = () => {
       return;
     }
 
+    // BRD Validation gate: if a document was uploaded but extraction failed, warn the user
+    const hasDocuments = processedFiles.some(f => f.status === 'done' && f.category === 'document');
+    if (hasDocuments && brdData && !brdData.isValid) {
+      addToast({
+        type: 'error',
+        title: 'BRD Validation Failed',
+        message: brdData.validationError || 'Insufficient structured data extracted from document.',
+        duration: 10000,
+      });
+      // Allow proceeding — fall back to generic mode
+    }
+
     const displayPrompt = input.trim() || (selectedTestCase ? TEST_CASE_TEMPLATES[selectedTestCase].label : 'File-based generation');
+    const brdLabel = brdData?.isValid ? ` [BRD: ${brdData.documentType}, ${brdData.functional_requirements.length} FRs]` : '';
     addMessage(
       "Orchestrator",
-      `Initializing automated SDLC for: "${displayPrompt}"`,
+      `Initializing automated SDLC for: "${displayPrompt}"${brdLabel}`,
       "thinking",
     );
 
     addToast({
       type: 'info',
       title: 'Pipeline Started',
-      message: `🚀 SDLC pipeline initialized. Starting requirements analysis...`,
+      message: brdData?.isValid
+        ? `BRD mode active — generating from "${brdData.sourceFiles.join(', ')}" with strict no-hallucination rules.`
+        : `SDLC pipeline initialized. Starting requirements analysis...`,
       duration: 5000,
     });
 
     await new Promise((r) => setTimeout(r, 800));
 
-    // Start with Requirements directly — pass attachments directly (don't rely on async setState)
-    await runRequirementPhase(enrichedPrompt, false, allAttachments);
+    // Capture brdData snapshot to pass directly (avoid stale closure)
+    const activeBrdData = brdData?.isValid ? brdData : null;
+
+    // Start with Requirements — pass attachments and BRD data directly
+    await runRequirementPhase(enrichedPrompt, false, allAttachments, activeBrdData);
   };
 
   // Correction to handleApprove ensuring correct flow
@@ -1058,13 +1237,13 @@ const App: React.FC = () => {
     setProject((p) =>
       p
         ? {
-            ...p,
-            isProcessing: false,
-            currentStep: 5,
-            waitingForApproval: false,
-            theme: selectedTheme,
-            attachments,
-          }
+          ...p,
+          isProcessing: false,
+          currentStep: 5,
+          waitingForApproval: false,
+          theme: selectedTheme,
+          attachments,
+        }
         : null,
     );
     addMessage(
@@ -1320,6 +1499,69 @@ const App: React.FC = () => {
                   onFilesChange={setProcessedFiles}
                   disabled={project?.isProcessing}
                 />
+
+                {/* FIGMA INTEGRATION SECTION */}
+                <div className="bg-slate-900/40 backdrop-blur-xl border border-white/5 rounded-3xl p-6 shadow-2xl relative overflow-hidden group mt-4">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-fuchsia-500/5 blur-[60px] rounded-full -z-10 group-hover:bg-fuchsia-500/10 transition-colors" />
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-400 flex items-center justify-center">
+                      <Layers className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-200">Figma Design Integration</h3>
+                      <p className="text-[10px] text-slate-500">Enable design-driven generation from file link</p>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        placeholder="https://www.figma.com/file/xxxx/Design-Name"
+                        value={figmaLink}
+                        onChange={(e) => setFigmaLink(e.target.value)}
+                        className="w-full bg-slate-950/50 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-300 focus:border-fuchsia-500/50 outline-none transition-all placeholder:text-slate-700"
+                      />
+                      {figmaData && (
+                        <div className="absolute right-3 top-2.5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleFetchFigma}
+                      disabled={!figmaLink || isFetchingFigma}
+                      className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-200 rounded-xl transition-all border border-slate-700 flex items-center gap-2 group/btn"
+                    >
+                      {isFetchingFigma ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <>
+                          <span className="text-xs font-bold">Link</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {figmaData && (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <div className="px-2 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-1.5">
+                        <Box className="w-3 h-3 text-emerald-400" />
+                        <span className="text-[10px] font-medium text-emerald-400">{figmaData.name}</span>
+                      </div>
+                      <div className="px-2 py-1 rounded-md bg-indigo-500/10 border border-indigo-500/20 flex items-center gap-1.5">
+                        <FileText className="w-3 h-3 text-indigo-400" />
+                        <span className="text-[10px] font-medium text-indigo-400">{figmaData.pages.length} Pages</span>
+                      </div>
+                      {figmaData.theme.fonts.length > 0 && (
+                        <div className="px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/20 flex items-center gap-1.5">
+                          <span className="text-[10px] font-medium text-amber-400">{figmaData.theme.fonts[0]} + {figmaData.theme.fonts.length - 1} Fonts</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {/* Smart domain detection indicator */}
                 {processedFiles.some(f => f.status === 'done' && f.category !== 'image') && !selectedTestCase && (() => {
                   const fileText = processedFiles.filter(f => f.status === 'done' && f.category !== 'image').map(f => f.content).join(' ');
@@ -1334,6 +1576,80 @@ const App: React.FC = () => {
                   }
                   return null;
                 })()}
+
+                {/* BRD Parsed Badge + Preview */}
+                {brdData && (
+                  <div className={`mt-2 rounded-xl border overflow-hidden transition-all ${brdData.isValid
+                      ? 'bg-emerald-500/5 border-emerald-500/20'
+                      : 'bg-rose-500/5 border-rose-500/20'
+                    }`}>
+                    <button
+                      onClick={() => setShowBRDPreview(v => !v)}
+                      className="w-full flex items-center justify-between px-3 py-2 text-left"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm">{brdData.isValid ? '📋' : '⚠️'}</span>
+                        <div>
+                          <span className={`text-[9px] font-black uppercase tracking-wider ${brdData.isValid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {brdData.isValid ? `Generated from ${brdData.documentType} Document` : 'BRD Parse Warning'}
+                          </span>
+                          <p className="text-[8px] text-slate-500 mt-0.5">
+                            {brdData.isValid
+                              ? `${brdData.functional_requirements.length} FRs · ${brdData.user_flows.length} Flows · ${brdData.modules.length} Modules`
+                              : brdData.validationError?.substring(0, 60) + '…'
+                            }
+                          </p>
+                        </div>
+                      </div>
+                      <svg className={`w-3 h-3 text-slate-500 transition-transform ${showBRDPreview ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+
+                    {showBRDPreview && brdData.isValid && (
+                      <div className="px-3 pb-3 space-y-2 border-t border-emerald-500/10">
+                        <p className="text-[8px] text-slate-500 uppercase tracking-widest font-bold mt-2">Extracted Requirements Preview</p>
+
+                        {brdData.functional_requirements.length > 0 && (
+                          <div>
+                            <p className="text-[8px] font-bold text-cyan-400 mb-1">Functional ({brdData.functional_requirements.length})</p>
+                            <div className="space-y-0.5 max-h-32 overflow-y-auto pr-1">
+                              {brdData.functional_requirements.map((fr, i) => (
+                                <p key={i} className="text-[8px] text-slate-400 leading-relaxed">
+                                  <span className="text-cyan-600 font-mono">FR-{i + 1}</span> {fr.length > 80 ? fr.substring(0, 80) + '…' : fr}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {brdData.user_flows.length > 0 && (
+                          <div>
+                            <p className="text-[8px] font-bold text-fuchsia-400 mb-1">User Flows ({brdData.user_flows.length})</p>
+                            <div className="space-y-0.5 max-h-20 overflow-y-auto pr-1">
+                              {brdData.user_flows.map((uf, i) => (
+                                <p key={i} className="text-[8px] text-slate-400 leading-relaxed">
+                                  <span className="text-fuchsia-600 font-mono">UF-{i + 1}</span> {uf.length > 80 ? uf.substring(0, 80) + '…' : uf}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {brdData.entities.length > 0 && (
+                          <div>
+                            <p className="text-[8px] font-bold text-amber-400 mb-1">Entities ({brdData.entities.length})</p>
+                            <div className="flex flex-wrap gap-1">
+                              {brdData.entities.slice(0, 8).map((e, i) => (
+                                <span key={i} className="text-[7px] px-1.5 py-0.5 bg-amber-500/10 border border-amber-500/20 rounded text-amber-400">{e.length > 20 ? e.substring(0, 20) + '…' : e}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </section>
 
@@ -1357,18 +1673,16 @@ const App: React.FC = () => {
                     const isActive = project.currentStep === agent.step;
                     return (
                       <div key={agent.step} className="flex items-center gap-1 flex-1">
-                        <div className={`w-1.5 h-1.5 rounded-full ${
-                          isRunning ? 'bg-yellow-400 animate-pulse' :
-                          isDone && !isActive ? 'bg-emerald-500' :
-                          isWaiting ? 'bg-blue-500/40' :
-                          isActive ? 'bg-indigo-400 animate-pulse' : 'bg-slate-700'
-                        }`} />
-                        <span className={`text-[8px] font-black uppercase tracking-widest ${
-                          isRunning ? 'text-yellow-400' :
-                          isDone && !isActive ? 'text-emerald-500' :
-                          isWaiting ? 'text-blue-400/50' :
-                          isActive ? 'text-indigo-400' : 'text-slate-600'
-                        }`}>
+                        <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-yellow-400 animate-pulse' :
+                            isDone && !isActive ? 'bg-emerald-500' :
+                              isWaiting ? 'bg-blue-500/40' :
+                                isActive ? 'bg-indigo-400 animate-pulse' : 'bg-slate-700'
+                          }`} />
+                        <span className={`text-[8px] font-black uppercase tracking-widest ${isRunning ? 'text-yellow-400' :
+                            isDone && !isActive ? 'text-emerald-500' :
+                              isWaiting ? 'text-blue-400/50' :
+                                isActive ? 'text-indigo-400' : 'text-slate-600'
+                          }`}>
                           {agent.name}
                         </span>
                         {agent.step < 4 && <div className={`flex-1 h-[1px] mx-1 ${isDone && !isActive ? 'bg-emerald-500/30' : 'bg-slate-800'}`} />}
@@ -1388,7 +1702,10 @@ const App: React.FC = () => {
                       ? "done"
                       : "idle"
                 }
-                description="Synthesizes raw prompts into structured BA documentation."
+                description={brdData?.isValid
+                  ? `BRD Mode — ${brdData.functional_requirements.length} FRs extracted from ${brdData.documentType}. Strict no-hallucination mode.`
+                  : "Synthesizes raw prompts into structured BA documentation."
+                }
                 icon={
                   <svg
                     className="w-5 h-5"
@@ -1561,8 +1878,7 @@ const App: React.FC = () => {
                     className="flex gap-6 animate-in fade-in slide-in-from-bottom-4 duration-700"
                   >
                     <div
-                      className={`flex-shrink-0 w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg ${
-                        msg.role === "Orchestrator"
+                      className={`flex-shrink-0 w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg ${msg.role === "Orchestrator"
                           ? "bg-indigo-600 text-white"
                           : msg.role === "Requirement"
                             ? "bg-cyan-600 text-white"
@@ -1573,7 +1889,7 @@ const App: React.FC = () => {
                                 : msg.role === "Parallel"
                                   ? "bg-violet-600 text-white"
                                   : "bg-emerald-600 text-white"
-                      }`}
+                        }`}
                     >
                       <span className="text-[10px] font-black uppercase">
                         {msg.role.slice(0, 2)}
@@ -1758,7 +2074,7 @@ const App: React.FC = () => {
                             const findByKey = (...suffixes: string[]) =>
                               suffixes.reduce<string | undefined>((found, s) =>
                                 found ?? Object.entries(codeMap).find(([k]) => k.toLowerCase().endsWith(s.toLowerCase()))?.[1]
-                              , undefined);
+                                , undefined);
 
                             previewCode =
                               codeMap["frontend/App.tsx"] ||
@@ -1780,7 +2096,7 @@ const App: React.FC = () => {
                               Object.values(codeMap).find(c => typeof c === "string") ||
                               "";
                           }
-                          
+
                           return <LivePreview code={previewCode} />;
                         })()}
                         {!isPreviewFullScreen && (
@@ -1823,11 +2139,10 @@ const App: React.FC = () => {
                               onClick={() =>
                                 setSelectedFile("generated_app.tsx")
                               }
-                              className={`w-full text-left px-4 py-1.5 text-xs font-mono transition-colors ${
-                                selectedFile === "generated_app.tsx"
+                              className={`w-full text-left px-4 py-1.5 text-xs font-mono transition-colors ${selectedFile === "generated_app.tsx"
                                   ? "bg-indigo-500/10 text-indigo-400 border-l-2 border-indigo-500"
                                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border-l-2 border-transparent"
-                              }`}
+                                }`}
                             >
                               <div className="flex items-center gap-2">
                                 <svg
@@ -1854,11 +2169,10 @@ const App: React.FC = () => {
                                 <button
                                   key={filename}
                                   onClick={() => setSelectedFile(filename)}
-                                  className={`w-full text-left px-4 py-1.5 text-xs font-mono transition-colors truncate ${
-                                    selectedFile === filename
+                                  className={`w-full text-left px-4 py-1.5 text-xs font-mono transition-colors truncate ${selectedFile === filename
                                       ? "bg-indigo-500/10 text-indigo-400 border-l-2 border-indigo-500"
                                       : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border-l-2 border-transparent"
-                                  }`}
+                                    }`}
                                   title={filename}
                                 >
                                   <div className="flex items-center gap-2">
@@ -2011,458 +2325,186 @@ const App: React.FC = () => {
                         <div className="space-y-8">
                           {/* REQUIREMENT SPEC */}
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  req: !prev.req,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, req: !prev.req }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-cyan-600/20 text-cyan-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Requirement Spec
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Requirement Spec</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.req ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "req")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.req ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.req && (
                               <div className="mt-4">
                                 {project?.requirements ? (
                                   <div className="space-y-6">
-                                    {project.requirements.executiveSummary && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-xs text-slate-400 leading-relaxed italic">
-                                        {project.requirements.executiveSummary}
-                                      </div>
-                                    )}
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                        User Stories & Acceptance Criteria
-                                      </h4>
-                                      <ul className="space-y-4">
-                                        {(Array.isArray(
-                                          project.requirements.userStories,
-                                        )
-                                          ? project.requirements.userStories
-                                          : []
-                                        ).map((s: any, i: number) => (
-                                          <li
-                                            key={i}
-                                            className="text-xs text-slate-400 bg-slate-800/30 p-3 rounded-xl border border-slate-800/50"
-                                          >
-                                              <div className="flex-1">
-                                                <div className="flex gap-2 mb-1.5">
-                                                  <span className="text-cyan-500 font-mono font-bold">
-                                                    #{s.id || i + 1}
-                                                  </span>
-                                                  <span className="font-medium text-slate-200">
-                                                    {typeof s === "string"
-                                                      ? s
-                                                      : s.story}
-                                                  </span>
-                                                  {s.priority && (
-                                                    <span
-                                                      className={`ml-auto text-[9px] uppercase font-bold px-2 py-0.5 rounded-full ${s.priority === "High" ? "bg-rose-500/20 text-rose-400" : "bg-slate-700 text-slate-400"}`}
-                                                    >
-                                                      {s.priority}
-                                                    </span>
-                                                  )}
-                                                </div>
-                                                {s.description && (
-                                                  <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
-                                                    {s.description}
-                                                  </p>
-                                                )}
-                                              </div>
-
-                                            {Array.isArray(
-                                              s.acceptanceCriteria,
-                                            ) &&
-                                              s.acceptanceCriteria.length >
-                                                0 && (
-                                                <ul className="pl-8 space-y-1 list-disc marker:text-slate-600">
-                                                  {s.acceptanceCriteria.map(
-                                                    (ac: string, j: number) => (
-                                                      <li
-                                                        key={j}
-                                                        className="text-slate-500"
-                                                      >
-                                                        {ac}
-                                                      </li>
-                                                    ),
-                                                  )}
-                                                </ul>
-                                              )}
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-
-                                    <div className="grid grid-cols-1 gap-4">
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed">
-                                        <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">
-                                          Scope Context
-                                        </span>
-                                        {project.requirements.scope}
-                                      </div>
-
-                                      {Array.isArray(
-                                        project.requirements
-                                          .technicalConstraints,
-                                      ) && (
-                                        <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed">
-                                          <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">
-                                            Technical Constraints
-                                          </span>
-                                          <ul className="list-disc pl-4 space-y-1">
-                                            {project.requirements.technicalConstraints.map(
-                                              (tc: string, k: number) => (
-                                                <li key={k}>{tc}</li>
-                                              ),
-                                            )}
-                                          </ul>
+                                    {(() => {
+                                      const r = project.requirements as any;
+                                      const overview = r.projectOverview || r.executiveSummary;
+                                      const scopeObj = typeof r.scope === 'object' && r.scope !== null ? r.scope : null;
+                                      const scopeStr = typeof r.scope === 'string' ? r.scope : null;
+                                      return (<>
+                                        {overview && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-cyan-400">Project Overview</h4><div className="text-xs text-slate-400 leading-relaxed bg-slate-800/30 p-4 rounded-xl border border-slate-800/50">{overview}</div></div>}
+                                        {r.businessObjectives && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-cyan-400">Business Objectives</h4><div className="text-xs text-slate-400 leading-relaxed bg-slate-800/30 p-4 rounded-xl border border-slate-800/50">{r.businessObjectives}</div></div>}
+                                        {(scopeObj || scopeStr) && (
+                                          <div className="grid grid-cols-2 gap-4">
+                                            {scopeObj ? (<>
+                                              {scopeObj.inScope && <div className="p-4 bg-slate-950 rounded-2xl border border-emerald-900/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-emerald-400 mb-2 uppercase tracking-tighter">In Scope</span><ul className="list-disc pl-4 space-y-1">{scopeObj.inScope.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                              {scopeObj.outOfScope && <div className="p-4 bg-slate-950 rounded-2xl border border-rose-900/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-rose-400 mb-2 uppercase tracking-tighter">Out of Scope</span><ul className="list-disc pl-4 space-y-1">{scopeObj.outOfScope.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                            </>) : <div className="col-span-2 p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Scope</span>{scopeStr}</div>}
+                                          </div>
+                                        )}
+                                        {r.stakeholders && r.stakeholders.length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Stakeholders</span><ul className="list-disc pl-4 space-y-1">{r.stakeholders.map((s: string, k: number) => <li key={k}>{s}</li>)}</ul></div>}
+                                        <div className="grid grid-cols-2 gap-4">
+                                          {r.functionalRequirements && r.functionalRequirements.length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Functional Requirements</span><ul className="list-disc pl-4 space-y-1">{r.functionalRequirements.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                          {r.nonFunctionalRequirements && r.nonFunctionalRequirements.length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Non-Functional Requirements</span><ul className="list-disc pl-4 space-y-1">{r.nonFunctionalRequirements.map((item: string, k: number) => <li key={k}>{item}</li>)}</ul></div>}
+                                          {r.technicalConstraints && r.technicalConstraints.length > 0 && !r.nonFunctionalRequirements && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Technical Constraints</span><ul className="list-disc pl-4 space-y-1">{r.technicalConstraints.map((tc: string, k: number) => <li key={k}>{tc}</li>)}</ul></div>}
                                         </div>
-                                      )}
-                                    </div>
+                                        <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">User Stories & Acceptance Criteria</h4>
+                                          <ul className="space-y-4">{(Array.isArray(r.userStories) ? r.userStories : []).map((s: any, i: number) => (
+                                            <li key={i} className="text-xs text-slate-400 bg-slate-800/30 p-3 rounded-xl border border-slate-800/50">
+                                              <div className="flex gap-2 mb-1.5">
+                                                <span className="text-cyan-500 font-mono font-bold">#{s.id || i + 1}</span>
+                                                <span className="font-medium text-slate-200">{typeof s === "string" ? s : s.story}</span>
+                                                {s.priority && <span className={`ml-auto text-[9px] uppercase font-bold px-2 py-0.5 rounded-full ${s.priority === "High" ? "bg-rose-500/20 text-rose-400" : "bg-slate-700 text-slate-400"}`}>{s.priority}</span>}
+                                              </div>
+                                              {s.description && <p className="text-[11px] text-slate-500 mb-2 leading-relaxed">{s.description}</p>}
+                                              {Array.isArray(s.acceptanceCriteria) && s.acceptanceCriteria.length > 0 && <ul className="pl-8 mt-2 space-y-1 list-disc marker:text-slate-600">{s.acceptanceCriteria.map((ac: string, j: number) => <li key={j} className="text-slate-500">{ac}</li>)}</ul>}
+                                            </li>
+                                          ))}</ul>
+                                        </div>
+                                        {(r.assumptionsAndConstraints || r.assumptions) && (r.assumptionsAndConstraints || r.assumptions).length > 0 && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Assumptions & Constraints</span><ul className="list-disc pl-4 space-y-1">{(r.assumptionsAndConstraints || r.assumptions).map((tc: string, k: number) => <li key={k}>{tc}</li>)}</ul></div>}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Documentation generation in progress...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">Documentation generation in progress...</p>}
                               </div>
                             )}
                           </section>
 
                           {/* DESIGN SPECIFICATION */}
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  design: !prev.design,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, design: !prev.design }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  System Design
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">System Design</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.design ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "design")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.design ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.design && (
                               <div className="mt-4">
                                 {project?.design ? (
                                   <div className="space-y-6">
-                                    {project.design.designSystem && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter text-[11px]">
-                                          Visual Theme & Design System
-                                        </span>
-                                        <div className="text-[11px] text-slate-500 leading-relaxed italic">
-                                          {project.design.designSystem}
-                                        </div>
-                                      </div>
-                                    )}
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                        Wireframe Concepts
-                                      </h4>
-                                      <div className="text-xs text-slate-400 whitespace-pre-wrap leading-relaxed bg-slate-800/20 p-4 rounded-xl border border-slate-800/50 font-mono">
-                                        {project.design.wireframes}
-                                      </div>
-                                    </div>
-
-                                    {project.design.apiEndpoints && (
-                                      <div>
-                                        <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">
-                                          API Contracts
-                                        </h4>
-                                        <div className="space-y-2">
-                                          {(Array.isArray(
-                                            project.design.apiEndpoints,
-                                          )
-                                            ? project.design.apiEndpoints
-                                            : []
-                                          ).map((ep: string, k: number) => (
-                                            <div
-                                              key={k}
-                                              className="text-[10px] font-mono text-emerald-400 bg-emerald-950/30 px-3 py-2 rounded-lg border border-emerald-900/50 truncate"
-                                            >
-                                              {ep}
-                                            </div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    )}
+                                    {(() => {
+                                      const d = project.design as any;
+                                      const stack = d.hld?.technologyStackOverview || d.designSystem;
+                                      const integrations = d.hld?.externalIntegrations || [];
+                                      const dataModels = d.lld?.dataModels || d.wireframes;
+                                      const endpoints: any[] = d.lld?.apiEndpoints || d.apiEndpoints || [];
+                                      return (<>
+                                        {(stack || integrations.length > 0) && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter text-[11px]">Technology Stack & Integrations</span><div className="text-[11px] text-slate-500 leading-relaxed">{stack && <><strong>Stack:</strong> {stack}<br /><br /></>}{integrations.length > 0 && <><strong>Integrations:</strong> {integrations.join(', ')}</>}</div></div>}
+                                        {dataModels && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">Data Models</h4><div className="text-xs text-slate-400 whitespace-pre-wrap leading-relaxed bg-slate-800/20 p-4 rounded-xl border border-slate-800/50 font-mono">{dataModels}</div></div>}
+                                        {endpoints.length > 0 && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">API Contracts</h4><div className="space-y-2">{endpoints.map((ep: any, k: number) => (
+                                          <div key={k} className="text-[10px] font-mono bg-emerald-950/30 px-3 py-2 rounded-lg border border-emerald-900/50">
+                                            {typeof ep === 'string' ? <span className="text-emerald-400">{ep}</span> : <><strong className="text-emerald-400 mr-2">{ep.method}</strong><span className="text-slate-300">{ep.endpoint}</span></>}
+                                          </div>
+                                        ))}</div></div>}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Design blueprints pending...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">Design blueprints pending...</p>}
+                              </div>
+                            )}
+                          </section>
+
+                          {/* DEVELOPMENT DOCUMENTATION */}
+                          <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, devdocs: !prev.devdocs }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg bg-orange-600/20 text-orange-500 flex items-center justify-center">
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
+                                </div>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Development Documentation</h3>
+                              </div>
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "devdocs")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-orange-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.devdocs ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>}
+                              </div>
+                            </div>
+                            {expandedDocs.devdocs && (
+                              <div className="mt-4">
+                                {project?.devDocs ? (
+                                  <div className="space-y-6">
+                                    <div className="grid grid-cols-2 gap-4">
+                                      {project.devDocs.techStack && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed"><span className="block font-bold text-orange-400 mb-2 uppercase tracking-tighter">Technology Stack</span>{project.devDocs.techStack}</div>}
+                                      {project.devDocs.projectStructure && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-500 leading-relaxed max-h-48 overflow-y-auto"><span className="block font-bold text-orange-400 mb-2 uppercase tracking-tighter">Project Structure</span><pre className="text-[10px] font-mono leading-tight">{project.devDocs.projectStructure}</pre></div>}
+                                    </div>
+                                    {project.devDocs.setupInstructions && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-400 font-mono whitespace-pre-wrap leading-relaxed"><span className="block font-bold text-orange-400 mb-2 uppercase tracking-tighter font-sans">Setup Instructions</span>{project.devDocs.setupInstructions}</div>}
+                                    {project.devDocs.deploymentOverview && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-400 leading-relaxed"><span className="block font-bold text-slate-400 mb-2 uppercase tracking-tighter">Deployment & Environment</span>{project.devDocs.environmentVariables && <><strong>Environment Variables:</strong> {project.devDocs.environmentVariables}<br /><br /></>}<strong>Deployment Overview:</strong> {project.devDocs.deploymentOverview}</div>}
+                                  </div>
+                                ) : <p className="text-xs text-slate-600 italic">Development documentation generation in progress...</p>}
                               </div>
                             )}
                           </section>
 
                           {/* VERIFICATION REPORT */}
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  test: !prev.test,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, test: !prev.test }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-emerald-600/20 text-emerald-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Verification Report
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Verification Report</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.test ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "test")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.test ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.test && (
                               <div className="mt-4">
                                 {project?.tests ? (
                                   <div className="space-y-6">
-                                    {project.tests.executiveSummary && (
-                                      <div className="p-4 bg-emerald-950/20 rounded-xl border border-emerald-900/30 mb-4">
-                                        <div className="text-[10px] font-bold text-emerald-500 uppercase mb-1">
-                                          Executive Summary
-                                        </div>
-                                        <div className="text-sm font-medium text-emerald-300">
-                                          {project.tests.executiveSummary}
-                                        </div>
-                                      </div>
-                                    )}
-
-                                    <div className="flex gap-4">
-                                      <div className="flex-1 bg-slate-800/50 p-3 rounded-xl">
-                                        <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">
-                                          Stability Score
-                                        </div>
-                                        <div className="text-sm font-bold text-slate-300">
-                                          98.2%
-                                        </div>
-                                      </div>
-                                      <div className="flex-1 bg-slate-800/50 p-3 rounded-xl">
-                                        <div className="text-[10px] font-bold text-slate-500 uppercase mb-1">
-                                          Total Coverage
-                                        </div>
-                                        <div className="text-sm font-bold text-slate-300">
-                                          85%
-                                        </div>
-                                      </div>
-                                    </div>
-
-                                    <div>
-                                      <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3 text-mt-2">
-                                        Verification Pass Strategy
-                                      </h4>
-                                      <ul className="space-y-4">
-                                        {(Array.isArray(project.tests.testCases)
-                                          ? project.tests.testCases
-                                          : []
-                                        ).map((tc: any, i: number) => (
-                                          <li
-                                            key={i}
-                                            className="flex items-start gap-4 text-[13px] text-slate-400 bg-slate-800/20 p-4 rounded-2xl border border-slate-800/50"
-                                          >
-                                            <div
-                                              className={`w-5 h-5 rounded-full flex items-center justify-center mt-0.5 flex-shrink-0 ${tc.status === "passed" ? "bg-emerald-500/20 text-emerald-500" : "bg-rose-500/20 text-rose-500"}`}
-                                            >
-                                              {tc.status === "passed" ? (
-                                                <CheckCircle2 className="w-3 h-3" />
-                                              ) : (
-                                                <AlertCircle className="w-3 h-3" />
-                                              )}
-                                            </div>
-                                            <div className="flex-1">
-                                              <div className="flex items-center gap-3 mb-2">
-                                                <span className="font-mono font-bold text-slate-500 text-[10px]">
-                                                  ID: {tc.id || i + 1}
-                                                </span>
-                                                {tc.severity && (
-                                                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-widest ${tc.severity === 'Critical' ? 'bg-rose-500 text-white' : tc.severity === 'Major' ? 'bg-amber-500 text-white' : 'bg-slate-700 text-slate-400'}`}>
-                                                    {tc.severity}
-                                                  </span>
-                                                )}
-                                                <span className={`ml-auto text-[10px] font-bold uppercase ${tc.status === 'passed' ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                                  {tc.status}
-                                                </span>
+                                    {(() => {
+                                      const t = project.tests as any;
+                                      return (<>
+                                        {t.testPlan && <div className="p-4 bg-emerald-950/20 rounded-xl border border-emerald-900/30"><div className="text-[10px] font-bold text-emerald-500 uppercase mb-2">Test Plan Overview</div><div className="text-xs text-slate-400 space-y-2">{t.testPlan.testingScope && <div><strong className="text-slate-300">Scope:</strong> {t.testPlan.testingScope}</div>}{t.testPlan.testingStrategy && <div><strong className="text-slate-300">Strategy:</strong> {t.testPlan.testingStrategy}</div>}{t.testPlan.toolsAndEnvironment && <div><strong className="text-slate-300">Tools:</strong> {t.testPlan.toolsAndEnvironment}</div>}{t.testPlan.entryExitCriteria && <div><strong className="text-slate-300">Entry/Exit:</strong> {t.testPlan.entryExitCriteria}</div>}</div></div>}
+                                        {t.executiveSummary && !t.testPlan && <div className="p-4 bg-emerald-950/20 rounded-xl border border-emerald-900/30"><div className="text-[10px] font-bold text-emerald-500 uppercase mb-1">Executive Summary</div><div className="text-sm font-medium text-emerald-300">{t.executiveSummary}</div></div>}
+                                        {t.testExecutionReport && <div className="flex gap-4"><div className="flex-1 bg-slate-800/50 p-3 rounded-xl border border-slate-800/50"><div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Test Summary</div><div className="text-xs font-medium text-slate-300">{t.testExecutionReport.summary}</div></div><div className="flex-1 bg-slate-800/50 p-3 rounded-xl border border-slate-800/50"><div className="text-[10px] font-bold text-slate-500 uppercase mb-1">Metrics & Defects</div><div className="text-xs font-medium text-slate-300">{t.testExecutionReport.passFailMetrics}{t.testExecutionReport.defectSummary && <><br /><br />{t.testExecutionReport.defectSummary}</>}</div></div></div>}
+                                        {t.testDesign && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-2">Coverage & Scenarios</h4><div className="text-[11px] text-slate-400 p-3 bg-slate-950 rounded-xl border border-slate-800/50 whitespace-pre-wrap"><strong>Coverage:</strong> {t.testDesign.testCoverage}<br /><br /><strong>Scenarios:</strong><br /><ul className="list-disc pl-4 space-y-1 mt-1">{(t.testDesign.testScenarios || []).map((s: string, k: number) => <li key={k}>{s}</li>)}</ul></div></div>}
+                                        {t.codeAudit && !t.testDesign && <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-2">Code Quality Audit</h4><div className="text-[11px] text-slate-400 p-3 bg-slate-950 rounded-xl border border-slate-800/50 whitespace-pre-wrap">{t.codeAudit}</div></div>}
+                                        <div><h4 className="text-[11px] font-bold text-slate-500 uppercase mb-3">Detailed Test Cases</h4>
+                                          <ul className="space-y-4">{(Array.isArray(t.testCases) ? t.testCases : []).map((tc: any, i: number) => (
+                                            <li key={i} className="flex items-start gap-4 text-[13px] text-slate-400 bg-slate-800/20 p-4 rounded-2xl border border-slate-800/50">
+                                              <div className={`w-5 h-5 rounded-full flex items-center justify-center mt-0.5 flex-shrink-0 ${tc.status === "passed" ? "bg-emerald-500/20 text-emerald-500" : tc.status === "failed" ? "bg-rose-500/20 text-rose-500" : "bg-amber-500/20 text-amber-500"}`}>
+                                                {tc.status === "passed" ? <CheckCircle2 className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
                                               </div>
-                                              <p className="font-medium text-slate-300 leading-relaxed mb-2">
-                                                {tc.description}
-                                              </p>
-                                              {tc.notes && (
-                                                <div className="p-3 bg-slate-950/50 rounded-xl text-[11px] text-slate-500 border border-slate-800/50">
-                                                  <strong>Observability Note:</strong> {tc.notes}
+                                              <div className="flex-1">
+                                                <div className="flex items-center gap-3 mb-2">
+                                                  <span className="font-mono font-bold text-slate-500 text-[10px]">ID: {tc.id || i + 1}</span>
+                                                  {tc.severity && <span className={`text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-widest ${tc.severity === 'Critical' ? 'bg-rose-500 text-white' : tc.severity === 'Major' ? 'bg-amber-500 text-white' : 'bg-slate-700 text-slate-400'}`}>{tc.severity}</span>}
+                                                  <span className={`ml-auto text-[10px] font-bold uppercase ${tc.status === 'passed' ? 'text-emerald-500' : tc.status === 'failed' ? 'text-rose-500' : 'text-amber-500'}`}>{tc.status}</span>
                                                 </div>
-                                              )}
-                                            </div>
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-
-                                    {project.tests.codeAudit && (
-                                      <div className="mt-4">
-                                        <h4 className="text-[11px] font-bold text-slate-500 uppercase mb-2">
-                                          Code Quality Audit
-                                        </h4>
-                                        <div className="text-[11px] text-slate-400 p-3 bg-slate-950 rounded-xl border border-slate-800/50 whitespace-pre-wrap">
-                                          {project.tests.codeAudit}
+                                                <p className="font-black text-slate-200 leading-relaxed mb-2">{tc.description}</p>
+                                                {tc.steps && tc.steps.length > 0 && <div className="text-[11px] text-slate-400 mb-2"><strong>Steps:</strong><ol className="list-decimal pl-4 space-y-0.5 mt-1">{tc.steps.map((st: string, idx: number) => <li key={idx}>{st}</li>)}</ol></div>}
+                                                {(tc.expectedResult || tc.actualResult) && <div className="grid grid-cols-2 gap-2 mt-3"><div className="p-2 bg-slate-950/50 rounded flex flex-col gap-1 border border-slate-800/50"><span className="text-[9px] uppercase font-bold text-slate-500">Expected</span><span className="text-[11px] text-slate-300">{tc.expectedResult}</span></div><div className="p-2 bg-slate-950/50 rounded flex flex-col gap-1 border border-slate-800/50"><span className="text-[9px] uppercase font-bold text-slate-500">Actual</span><span className="text-[11px] text-slate-300">{tc.actualResult}</span></div></div>}
+                                                {tc.notes && !tc.expectedResult && <div className="p-3 bg-slate-950/50 rounded-xl text-[11px] text-slate-500 border border-slate-800/50"><strong>Note:</strong> {tc.notes}</div>}
+                                              </div>
+                                            </li>
+                                          ))}</ul>
                                         </div>
-                                      </div>
-                                    )}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    QA cycle pending...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">QA cycle pending...</p>}
                               </div>
                             )}
                           </section>
@@ -2470,136 +2512,42 @@ const App: React.FC = () => {
 
                         <div className="space-y-8">
                           <section className="bg-slate-900/50 border border-slate-800 rounded-3xl p-8 h-fit">
-                            <button
-                              onClick={() =>
-                                setExpandedDocs((prev) => ({
-                                  ...prev,
-                                  arch: !prev.arch,
-                                }))
-                              }
-                              className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none"
-                            >
+                            <div onClick={() => setExpandedDocs((prev) => ({ ...prev, arch: !prev.arch }))} className="w-full flex items-center justify-between mb-6 group cursor-pointer outline-none">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg bg-fuchsia-600/20 text-fuchsia-500 flex items-center justify-center">
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth="2"
-                                      d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                                    ></path>
-                                  </svg>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path></svg>
                                 </div>
-                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">
-                                  Architectural Design
-                                </h3>
+                                <h3 className="text-sm font-black text-slate-300 uppercase tracking-widest group-hover:text-white transition-colors">Architectural Design</h3>
                               </div>
-                              <div className="text-slate-500 group-hover:text-slate-300 transition-colors">
-                                {expandedDocs.arch ? (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M5 15l7-7 7 7"
-                                    />
-                                  </svg>
-                                ) : (
-                                  <svg
-                                    className="w-5 h-5"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 9l-7 7-7-7"
-                                    />
-                                  </svg>
-                                )}
+                              <div className="flex items-center gap-4 text-slate-500 group-hover:text-slate-300 transition-colors">
+                                <button onClick={(e) => downloadSectionAsMd(e, "arch")} className="w-7 h-7 flex items-center justify-center rounded bg-slate-800/80 hover:bg-indigo-600 hover:text-white transition-all outline-none" title="Download as .md"><Download className="w-4 h-4" /></button>
+                                {expandedDocs.arch ? <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>}
                               </div>
-                            </button>
+                            </div>
                             {expandedDocs.arch && (
                               <div className="mt-4">
                                 {project?.design ? (
                                   <div className="space-y-4">
-                                    {project.design.architectureDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-slate-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          System Architecture
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.architectureDiagram}
-                                          title="System Architecture"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.componentDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-cyan-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          HLD — Component Hierarchy
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.componentDiagram}
-                                          title="Component Hierarchy"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.erDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-emerald-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          ER Diagram — Data Entities
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.erDiagram}
-                                          title="ER Diagram"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.sequenceDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-amber-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          Sequence Diagram — User Flow
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.sequenceDiagram}
-                                          title="Sequence Diagram"
-                                        />
-                                      </div>
-                                    )}
-                                    {project.design.lldDiagram && (
-                                      <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50">
-                                        <span className="block font-bold text-rose-400 mb-3 uppercase tracking-tighter text-[11px]">
-                                          LLD — Low Level Design
-                                        </span>
-                                        <MermaidDiagram
-                                          chart={project.design.lldDiagram}
-                                          title="Low Level Design"
-                                        />
-                                      </div>
-                                    )}
-                                    <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 font-mono text-[10px] text-slate-500 leading-relaxed whitespace-pre-wrap italic">
-                                      {project.design.architecture ||
-                                        "Blueprint validated."}
-                                    </div>
+                                    {(() => {
+                                      const d = project.design as any;
+                                      const sysArch = d.hld?.systemArchitectureOverview;
+                                      const archDiag = d.hld?.architectureDiagram || d.architectureDiagram;
+                                      const compDiag = d.hld?.componentDiagram || d.componentDiagram;
+                                      const erDiag = d.databaseDesign?.erDiagram || d.erDiagram;
+                                      const seqDiag = d.lld?.sequenceFlows || d.sequenceDiagram;
+                                      const lldDiag = d.lld?.classDiagram || d.lldDiagram;
+                                      return (<>
+                                        {sysArch && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 text-[11px] text-slate-400 leading-relaxed font-mono whitespace-pre-wrap"><span className="block font-bold text-slate-300 mb-2 uppercase tracking-tight font-sans">System Architecture Overview</span>{sysArch}</div>}
+                                        {archDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-slate-300 mb-2 uppercase tracking-tight font-sans text-[11px]">Architecture Diagram</span><MermaidDiagram chart={archDiag} title="System Architecture" /></div>}
+                                        {compDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-cyan-400 mb-3 uppercase tracking-tighter text-[11px]">HLD — Component Hierarchy</span><MermaidDiagram chart={compDiag} title="Component Hierarchy" /></div>}
+                                        {erDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-emerald-400 mb-3 uppercase tracking-tighter text-[11px]">ER Diagram — Data Entities</span><MermaidDiagram chart={erDiag} title="ER Diagram" /></div>}
+                                        {seqDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-amber-400 mb-3 uppercase tracking-tighter text-[11px]">Sequence Diagram — User Flow</span><MermaidDiagram chart={seqDiag} title="Sequence Diagram" /></div>}
+                                        {lldDiag && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50"><span className="block font-bold text-rose-400 mb-3 uppercase tracking-tighter text-[11px]">LLD — Low Level Details</span><MermaidDiagram chart={lldDiag} title="Low Level Design" /></div>}
+                                        {d.architecture && <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800/50 font-mono text-[10px] text-slate-500 leading-relaxed whitespace-pre-wrap italic">{d.architecture}</div>}
+                                      </>);
+                                    })()}
                                   </div>
-                                ) : (
-                                  <p className="text-xs text-slate-600 italic">
-                                    Architect is mapping system entities...
-                                  </p>
-                                )}
+                                ) : <p className="text-xs text-slate-600 italic">Architect is mapping system entities...</p>}
                               </div>
                             )}
                           </section>
@@ -2612,6 +2560,11 @@ const App: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* Right Side: User Stories Library */}
+        {project?.requirements?.userStories && project.requirements.userStories.length > 0 && (
+          <UserStoriesLibrary stories={project.requirements.userStories} />
+        )}
       </main>
 
       {/* Status Bar */}
