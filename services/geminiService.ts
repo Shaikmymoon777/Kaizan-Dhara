@@ -67,9 +67,9 @@ export class GeminiService {
         if (!this.ai) {
           throw new Error("AI Proxy unavailable and no direct SDK fallback configured (missing API key).");
         }
-        const genModel = this.ai.getGenerativeModel({ 
+        const genModel = this.ai.getGenerativeModel({
           model: modelName,
-          systemInstruction: systemInstruction 
+          systemInstruction: systemInstruction
         });
 
         const formattedContents = Array.isArray(contents)
